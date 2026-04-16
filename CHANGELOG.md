@@ -7,6 +7,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Hybrid Chat + RAG Endpoint** (#new)
+  - New `/api/chat/rag/execute` endpoint combining conversational memory with dynamic RAG retrieval
+  - Multi-search strategy generation: AI automatically creates 3-5 optimized queries per question
+  - Conversational memory with LangGraph: maintains chat history across requests
+  - Session-based chat with persistent storage in SurrealDB
+  - Text search fallback when vector embeddings unavailable (no OpenAI API key required)
+  - Automatic chunk retrieval from source embeddings (up to 5 chunks per document)
+  - Source citations in responses with `[source:id]` and `[insight:id]` references
+  - Support for model overrides per session and per request
+  - Streaming and non-streaming response modes
+  - Full integration with existing chat sessions (`/api/chat/sessions`)
+
+- **AI Chat Widget** (in `/DEV/ai-widget`)
+  - Next.js chat widget with shadcn/ui components
+  - Automatic session management with HTTP-only cookies (24h expiry)
+  - Real-time streaming responses with SSE
+  - Dark mode support
+  - Mobile responsive design
+  - Quick action buttons for common queries
+  - Session reset endpoint for testing
+  - Configurable via environment variables
+
+### Changed
+- Chat RAG endpoint automatically detects embedding model availability and falls back to text search
+- Chunk enrichment logic now fetches actual embedding chunks from database instead of full documents
+- Session management supports both automatic creation and explicit session IDs
+- Text search now retrieves embedding chunks for granular content instead of full source documents
+
+### Fixed
+- Vector search dependency removed for basic chat functionality
+- Text search results now include content from embedding chunks
+- Fixed UUID generation for environments without crypto.randomUUID()
+- Fixed model defaults access using getattr() instead of dict.get()
+- Fixed embedding model check to properly handle exceptions
+- Fixed chunk content retrieval to work with text search fallback
+- Fixed SourceInsight title attribute error in chunk enrichment
+
+### Docs
+- Updated QUICKSTART-DOCKER.md with hybrid endpoint documentation
+- Added examples for testing conversational memory
+- Added widget integration guide with configuration
+- Added troubleshooting section for common Docker issues
+- Created comprehensive CHAT_RAG_ENDPOINT.md documentation
+- Updated ai-widget README.md with new endpoint architecture
+- Documented text search fallback behavior
+- Added session management examples
+
+### Technical Details
+- **Backend Changes:**
+  - `api/routers/chat_rag.py` - New hybrid endpoint router with multi-search and chunk retrieval
+  - `api/main.py` - Registered chat_rag router
+  - Uses existing chat graph from `open_notebook/graphs/chat.py`
+  - Leverages ask graph strategy logic from `open_notebook/graphs/ask.py`
+  - Integrates with SurrealDB source_embedding table for chunk retrieval
+
+- **Frontend Changes (ai-widget):**
+  - `app/api/chat/route.ts` - Updated to use `/api/chat/rag/execute`
+  - `app/api/chat/reset/route.ts` - New session reset endpoint
+  - `components/ai-chat-widget.tsx` - Fixed UUID generation for browser compatibility
+  - `.env.local` - Updated configuration for notebook and model IDs
+
+- **Key Features:**
+  - Text search retrieves embedding chunks (not full documents) for granular RAG
+  - Multi-search executes 3-5 parallel searches per question
+  - Sessions stored in SurrealDB with LangGraph state management
+  - Automatic fallback from vector search to text search on API key errors
+
 ## [1.8.5] - 2026-04-14
 
 ### Fixed
@@ -141,6 +209,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Dependencies
 - Bump langchain-core from 1.2.7 to 1.2.11 (#564)
 - Bump cryptography from 46.0.3 to 46.0.5 (#563)
+>>>>>>> d7967a0fcf3fa1149e15e5b205c2a4cdc529a7eb
 
 ## [1.7.0] - 2026-02-10
 

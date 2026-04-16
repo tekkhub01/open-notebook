@@ -2,7 +2,7 @@ services:
   surrealdb:
     image: surrealdb/surrealdb:v2
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
-    user: root  # Required for bind mounts on Linux
+    user: root
     ports:
       - "8000:8000"
     volumes:
@@ -13,7 +13,9 @@ services:
     pull_policy: always
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     # Ports exposed only internally - nginx handles external access
     expose:
       - "8502"  # Web UI
@@ -25,19 +27,17 @@ services:
       - SURREAL_PASSWORD=root
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
-      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENROUTER_API_KEY=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
     volumes:
       - ./notebook_data:/app/data
     depends_on:
       - surrealdb
     restart: always
-    pull_policy: always
 
   nginx:
     image: nginx:alpine
     ports:
-      - "5055:5055" # Open-Notebook API (HTTPS)
+      - "5055:5055"   # HTTPS on port 5055
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./ssl:/etc/nginx/ssl:ro
