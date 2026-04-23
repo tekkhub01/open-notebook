@@ -6,12 +6,14 @@ The first step in the process is receiving the user's question and formulating a
 
 # YOUR JOB
 
-Based on the user question, you need to analyze the key concepts and terms to determine the appropriate search strategy. 
+Based on the user question, you need to analyze the key concepts and terms to determine the appropriate search strategy.
 
 Step 1: develop your search strategy (reasoning)
 Step 2: formulate your search queries (searches)
 
 Return both the reasoning and searches as a JSON object, like in the EXAMPLE below.
+
+**Language rule**: write every search term in the **same language as the user's question**. If the user writes in Italian, all `term` values must be in Italian; if in English, English; etc. Do not translate search terms into other languages — it wastes searches against a single-language corpus.
 
 # EXAMPLE
 

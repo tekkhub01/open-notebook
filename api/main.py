@@ -3,6 +3,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import asyncio
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
@@ -108,13 +109,50 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Podcast profile migration encountered errors: {e}")
         # Non-fatal: profiles can be migrated manually via UI
 
+    # Background task: prune rag_trace rows older than RAG_TRACE_RETENTION_DAYS.
+    retention_days = int(os.environ.get("RAG_TRACE_RETENTION_DAYS", "14"))
+    cleanup_task = asyncio.create_task(
+        _rag_trace_cleanup_loop(retention_days=retention_days)
+    )
+
     logger.success("API initialization completed successfully")
 
     # Yield control to the application
     yield
 
-    # Shutdown: cleanup if needed
+    # Shutdown: cancel background tasks
+    cleanup_task.cancel()
+    try:
+        await cleanup_task
+    except asyncio.CancelledError:
+        pass
     logger.info("API shutdown complete")
+
+
+async def _rag_trace_cleanup_loop(
+    interval_s: int = 24 * 3600, retention_days: int = 14
+) -> None:
+    """Daily best-effort purge of rag_trace rows older than `retention_days`."""
+    from open_notebook.database.repository import repo_query
+
+    # Initial delay keeps the first run out of the startup log / migration window.
+    await asyncio.sleep(60)
+    while True:
+        try:
+            deleted = await repo_query(
+                f"DELETE rag_trace WHERE created < time::now() - {retention_days}d RETURN BEFORE;"
+            )
+            count = len(deleted) if deleted else 0
+            if count:
+                logger.info(
+                    f"rag_trace cleanup: pruned {count} rows older than "
+                    f"{retention_days}d"
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(f"rag_trace cleanup failed: {e}")
+        await asyncio.sleep(interval_s)
 
 
 app = FastAPI(

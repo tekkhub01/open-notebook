@@ -44,3 +44,11 @@ services:
     depends_on:
       - open_notebook
     restart: always
+
+  surrealist:
+    image: surrealdb/surrealist:latest
+    ports:
+      - "8080:8080"
+    depends_on:
+      - surrealdb
+    restart: always

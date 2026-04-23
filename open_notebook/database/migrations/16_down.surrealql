@@ -1,0 +1,3 @@
+-- Rollback: drop rag_trace table and its indexes.
+
+REMOVE TABLE IF EXISTS rag_trace;

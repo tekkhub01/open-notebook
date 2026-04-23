@@ -1,0 +1,10 @@
+-- Migration 16: RAG trace table for observability
+-- Stores per-query records of the chat_rag pipeline: question, planner
+-- strategy, retrieved chunks, final answer, per-phase timings. SCHEMALESS
+-- so fields can evolve without a new migration. Rows are auto-expired by
+-- a background cleanup task (14 day retention by default).
+
+DEFINE TABLE IF NOT EXISTS rag_trace SCHEMALESS;
+
+DEFINE INDEX IF NOT EXISTS rag_trace_created ON TABLE rag_trace COLUMNS created;
+DEFINE INDEX IF NOT EXISTS rag_trace_session ON TABLE rag_trace COLUMNS session_id;

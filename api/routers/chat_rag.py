@@ -5,6 +5,7 @@ Hybrid Chat + RAG endpoint combining:
 """
 import asyncio
 import json
+import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import APIRouter, HTTPException
@@ -82,120 +83,137 @@ async def generate_search_strategy(
 
 
 async def execute_multi_search(
-    strategy: Strategy, notebook_id: str | None = None
+    strategy: Strategy,
+    notebook_id: str | None = None,
+    min_similarity: float = 0.5,
+    per_search_results: int = 10,
 ) -> List[Dict[str, Any]]:
-    """Execute all searches from strategy and collect chunks."""
+    """Execute all searches from the strategy, normalize hits, and deduplicate.
+
+    vector_search returns rows of `{id, parent_id, title, similarity, matches}`
+    where `matches` is a flattened array of content strings for that record.
+    text_search returns `{id, parent_id, title, relevance}` with no content.
+
+    Dedup key is `id` (not parent_id) so a source and its derived "Dense Summary"
+    insight — which share parent_id but have different ids — both stay in play.
+    Highest score wins on collision.
+    """
     from open_notebook.domain.notebook import text_search
 
-    all_chunks = []
-    seen_ids = set()
-
-    # Check if embedding model is available for vector search
     use_vector_search = False
     try:
         embedding_model = await model_manager.get_embedding_model()
         use_vector_search = embedding_model is not None
     except Exception as e:
         logger.warning(f"Could not get embedding model: {e}, will use text search")
-        use_vector_search = False
 
+    results_list: List[List[Dict[str, Any]]] = []
     if use_vector_search:
-        logger.info(f"Using vector search for multi-search strategy (notebook_id={notebook_id})")
+        logger.info(
+            f"Using vector search (min_similarity={min_similarity}, notebook={notebook_id})"
+        )
         try:
-            # Execute searches in parallel
-            tasks = [
-                vector_search(
-                    search.term, results=10, source=True, note=True,
-                    notebook_id=notebook_id,
-                )
-                for search in strategy.searches
-            ]
-
-            results_list = await asyncio.gather(*tasks)
+            results_list = await asyncio.gather(
+                *[
+                    vector_search(
+                        s.term,
+                        results=per_search_results,
+                        source=True,
+                        note=True,
+                        minimum_score=min_similarity,
+                        notebook_id=notebook_id,
+                    )
+                    for s in strategy.searches
+                ]
+            )
         except Exception as e:
-            logger.warning(f"Vector search failed: {e}, falling back to text search")
+            logger.warning(f"Vector search failed: {e}; falling back to text search")
             use_vector_search = False
 
     if not use_vector_search:
-        logger.info(f"Using text search for multi-search strategy (notebook_id={notebook_id})")
-        # Fallback to text search
-        tasks = [
-            text_search(
-                search.term, results=10, source=True, note=True,
-                notebook_id=notebook_id,
-            )
-            for search in strategy.searches
-        ]
-        results_list = await asyncio.gather(*tasks)
-    
-    # Deduplicate and enrich chunks with content
-    from open_notebook.database.repository import repo_query, ensure_record_id
-    
+        logger.info(f"Using text search fallback (notebook={notebook_id})")
+        results_list = await asyncio.gather(
+            *[
+                text_search(
+                    s.term,
+                    results=per_search_results,
+                    source=True,
+                    note=True,
+                    notebook_id=notebook_id,
+                )
+                for s in strategy.searches
+            ]
+        )
+
+    # Normalize + dedup on id (keep highest score).
+    best_by_id: Dict[str, Dict[str, Any]] = {}
     for results in results_list:
-        if results:
-            for chunk in results:
-                chunk_id = chunk.get("id")
-                parent_id = chunk.get("parent_id") or chunk_id
-                
-                if chunk_id and chunk_id not in seen_ids:
-                    seen_ids.add(chunk_id)
-                    
-                    # If chunk already has content, use it directly
-                    if chunk.get("content") or chunk.get("text") or chunk.get("chunk"):
-                        all_chunks.append(chunk)
-                        continue
-                    
-                    # Otherwise, fetch embedding chunks for this source
-                    try:
-                        if parent_id.startswith("source:"):
-                            # Get embedding chunks for this source
-                            embedding_chunks = await repo_query(
-                                """
-                                SELECT content, chunk_index 
-                                FROM source_embedding 
-                                WHERE source = $source_id 
-                                ORDER BY chunk_index 
-                                LIMIT 5
-                                """,
-                                {"source_id": ensure_record_id(parent_id)}
-                            )
-                            
-                            if embedding_chunks:
-                                # Add each embedding chunk as a separate result
-                                for idx, emb_chunk in enumerate(embedding_chunks):
-                                    chunk_copy = chunk.copy()
-                                    chunk_copy["content"] = emb_chunk.get("content", "")
-                                    chunk_copy["chunk_index"] = emb_chunk.get("chunk_index", idx)
-                                    chunk_copy["id"] = f"{parent_id}_chunk_{idx}"
-                                    all_chunks.append(chunk_copy)
-                            else:
-                                # No embeddings, try full text
-                                from open_notebook.domain.notebook import Source
-                                source = await Source.get(parent_id)
-                                if source and source.full_text:
-                                    chunk["content"] = source.full_text[:3000]
-                                    all_chunks.append(chunk)
-                        
-                        elif parent_id.startswith("note:"):
-                            from open_notebook.domain.notebook import Note
-                            note = await Note.get(parent_id)
-                            if note:
-                                chunk["content"] = note.content or ""
-                                all_chunks.append(chunk)
-                        
-                        elif parent_id.startswith("source_insight:"):
-                            from open_notebook.domain.notebook import SourceInsight
-                            insight = await SourceInsight.get(parent_id)
-                            if insight:
-                                chunk["content"] = insight.content or ""
-                                all_chunks.append(chunk)
-                        
-                    except Exception as e:
-                        logger.warning(f"Could not enrich chunk {chunk_id}: {e}")
-                        # Still add chunk without content
-                        all_chunks.append(chunk)
-    
-    logger.info(f"Enriched {len(all_chunks)} chunks with content")
+        if not results:
+            continue
+        for hit in results:
+            hit_id = str(hit.get("id")) if hit.get("id") is not None else None
+            if not hit_id:
+                continue
+
+            score = hit.get("similarity") or hit.get("relevance") or 0.0
+            try:
+                score = float(score)
+            except (TypeError, ValueError):
+                score = 0.0
+
+            raw_matches = hit.get("matches")
+            if isinstance(raw_matches, list):
+                content = "\n\n".join(str(m) for m in raw_matches if m)
+            elif raw_matches:
+                content = str(raw_matches)
+            else:
+                content = hit.get("content") or ""
+
+            normalized = {
+                "id": hit_id,
+                "parent_id": str(hit.get("parent_id"))
+                if hit.get("parent_id") is not None
+                else hit_id,
+                "title": hit.get("title", "") or "",
+                "score": score,
+                "content": content,
+            }
+
+            existing = best_by_id.get(hit_id)
+            if existing is None or existing["score"] < normalized["score"]:
+                best_by_id[hit_id] = normalized
+
+    # text_search hits have no content; fetch from the owning record so the LLM
+    # has something substantive to work with.
+    need_content = [c for c in best_by_id.values() if not c["content"]]
+    if need_content:
+        from open_notebook.domain.notebook import Note, Source, SourceInsight
+
+        for chunk in need_content:
+            pid = chunk["parent_id"]
+            try:
+                if pid.startswith("source:"):
+                    src = await Source.get(pid)
+                    if src and src.full_text:
+                        chunk["content"] = src.full_text[:3000]
+                elif pid.startswith("note:"):
+                    note = await Note.get(pid)
+                    if note:
+                        chunk["content"] = note.content or ""
+                elif pid.startswith("source_insight:"):
+                    insight = await SourceInsight.get(pid)
+                    if insight:
+                        chunk["content"] = insight.content or ""
+            except Exception as e:
+                logger.warning(f"Could not enrich {chunk['id']}: {e}")
+
+    all_chunks = sorted(
+        best_by_id.values(), key=lambda c: c.get("score", 0.0), reverse=True
+    )
+    logger.info(
+        f"Retrieved {len(all_chunks)} unique chunks (from "
+        f"{sum(len(r or []) for r in results_list)} raw hits)"
+    )
     return all_chunks
 
 
@@ -239,6 +257,18 @@ async def stream_chat_rag_response(
         if session_id.startswith("chat_session:")
         else f"chat_session:{session_id}"
     )
+    # Trace state: filled incrementally so we can write it even on error paths.
+    t_start = time.monotonic()
+    trace: Dict[str, Any] = {
+        "session_id": full_session_id,
+        "notebook_id": notebook_id,
+        "question": message,
+        "strategy_model": strategy_model_id,
+        "chat_model": model_override,
+    }
+    strategy = None
+    chunks: List[Dict[str, Any]] = []
+    final_content = ""
     try:
         session = await ChatSession.get(full_session_id)
         if not session:
@@ -250,11 +280,13 @@ async def stream_chat_rag_response(
             if model_override is not None
             else getattr(session, "model_override", None)
         )
+        trace["chat_model"] = final_model_override
 
         # Immediate first byte so the proxy sees the stream is alive.
         yield _sse({"type": "planning"})
 
         # ---- Phase 1: planning agent (with keep-alive) ----
+        t_phase = time.monotonic()
         planning_task = asyncio.create_task(
             generate_search_strategy(message, strategy_model_id)
         )
@@ -263,6 +295,7 @@ async def stream_chat_rag_response(
         ):
             yield keepalive
         strategy = await planning_task
+        trace["planning_ms"] = int((time.monotonic() - t_phase) * 1000)
 
         reasoning = (strategy.reasoning or "").strip()
         # Truncate: we just want to show something is happening, not the full CoT.
@@ -270,6 +303,7 @@ async def stream_chat_rag_response(
         yield _sse({"type": "plan", "reasoning": truncated})
 
         # ---- Phase 2: multi-search (with keep-alive) ----
+        t_phase = time.monotonic()
         search_task = asyncio.create_task(
             execute_multi_search(strategy, notebook_id=notebook_id)
         )
@@ -278,10 +312,12 @@ async def stream_chat_rag_response(
         ):
             yield keepalive
         chunks = await search_task
+        trace["search_ms"] = int((time.monotonic() - t_phase) * 1000)
 
         yield _sse({"type": "strategy", "chunks_retrieved": len(chunks)})
 
         # ---- Phase 3: responding agent (token-streamed, bypasses chat_graph) ----
+        t_phase = time.monotonic()
         # Load prior conversation from the checkpointer.
         current_state = await asyncio.to_thread(
             chat_graph.get_state,
@@ -293,15 +329,30 @@ async def stream_chat_rag_response(
             else []
         )
 
+        # Render context as a clean per-source markdown block. Jinja was
+        # previously handed a dict which stringified to Python repr — ugly for
+        # the LLM and the citation IDs embedded in the repr were fabricated.
+        # Now: one section per real record, real IDs, content straight from
+        # vector_search.matches.
+        context_blocks: List[str] = []
+        for c in chunks:
+            content = (c.get("content") or "").strip()
+            if not content:
+                continue
+            header = f"### [{c['id']}] {c.get('title') or c['id']}"
+            context_blocks.append(f"{header}\n{content}")
+        context_text = "\n\n".join(context_blocks) if context_blocks else ""
+
+        # Keep the structured form around for trace persistence.
         context_data = {
             "sources": [
                 {
-                    "id": chunk.get("id"),
-                    "content": chunk.get("content", ""),
-                    "title": chunk.get("title", ""),
-                    "score": chunk.get("score", 0),
+                    "id": c.get("id"),
+                    "content": c.get("content", ""),
+                    "title": c.get("title", ""),
+                    "score": c.get("score", 0),
                 }
-                for chunk in chunks
+                for c in chunks
             ]
         }
 
@@ -309,7 +360,7 @@ async def stream_chat_rag_response(
             data={
                 "messages": prior_messages,
                 "notebook": None,
-                "context": context_data,
+                "context": context_text,
                 "context_config": None,
                 "model_override": final_model_override,
             }
@@ -343,6 +394,7 @@ async def stream_chat_rag_response(
                 yield _sse({"type": "answer_delta", "content": new_text})
 
         final_content = clean_thinking_content(raw_buffer)
+        trace["answer_ms"] = int((time.monotonic() - t_phase) * 1000)
 
         # Final consolidated answer event (keeps non-streaming path working).
         yield _sse({"type": "answer", "content": final_content})
@@ -372,7 +424,40 @@ async def stream_chat_rag_response(
 
     except Exception as e:
         logger.error(f"Error in chat RAG streaming: {str(e)}")
+        trace["error"] = str(e)
         yield _sse({"type": "error", "message": str(e)})
+    finally:
+        trace["total_ms"] = int((time.monotonic() - t_start) * 1000)
+        trace["final_answer"] = final_content
+        trace["chunks_count"] = len(chunks)
+        if strategy is not None:
+            trace["strategy_reasoning"] = strategy.reasoning or ""
+            trace["strategy_searches"] = [
+                {
+                    "term": getattr(s, "term", ""),
+                    "instructions": getattr(s, "instructions", ""),
+                }
+                for s in (strategy.searches or [])
+            ]
+        # Keep chunk snapshots small — only identifiers, scores, and short preview.
+        trace["chunks_retrieved"] = [
+            {
+                "id": str(c.get("id")) if c.get("id") is not None else None,
+                "parent_id": str(c.get("parent_id")) if c.get("parent_id") else None,
+                "title": c.get("title", ""),
+                "score": c.get("score")
+                or c.get("similarity")
+                or c.get("relevance"),
+                "content_preview": (c.get("content") or "")[:500],
+            }
+            for c in chunks[:20]
+        ]
+        try:
+            from open_notebook.database.repository import repo_create
+
+            await repo_create("rag_trace", trace)
+        except Exception as trace_err:
+            logger.warning(f"Failed to persist rag_trace: {trace_err}")
 
 
 async def _resolve_strategy_model(requested: Optional[str]) -> str:
