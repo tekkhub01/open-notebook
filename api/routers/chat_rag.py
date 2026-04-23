@@ -61,7 +61,7 @@ async def generate_search_strategy(
     system_prompt = Prompter(
         prompt_template="ask/entry", parser=parser
     ).render(data={"question": question})
-    
+
     model = await provision_langchain_model(
         system_prompt,
         strategy_model_id,
@@ -69,7 +69,7 @@ async def generate_search_strategy(
         max_tokens=2000,
         structured=dict(type="json"),
     )
-    
+
     ai_message = await model.ainvoke(system_prompt)
     message_content = (
         ai_message.content
@@ -78,8 +78,67 @@ async def generate_search_strategy(
     )
     cleaned_content = clean_thinking_content(message_content)
     strategy = parser.parse(cleaned_content)
-    
+
     return strategy
+
+
+async def condense_question(
+    question: str,
+    prior_messages: List[Any],
+    strategy_model_id: str,
+    max_recent: int = 6,
+) -> str:
+    """Rewrite a follow-up message as a standalone question using the last
+    few turns of conversation. Keeps retrieval sane when the user says things
+    like "tell me more about that" — the planner only sees the latest message
+    otherwise and can't disambiguate references.
+
+    Fails open: on any error or empty output, returns the original question.
+    """
+    if not prior_messages:
+        return question
+
+    recent = prior_messages[-max_recent:]
+    log_lines = []
+    for msg in recent:
+        is_human = isinstance(msg, HumanMessage)
+        role = "User" if is_human else "Assistant"
+        raw = getattr(msg, "content", msg)
+        content = extract_text_content(raw) if raw is not None else ""
+        # Keep each line short — we don't need full prior answers to disambiguate.
+        if content and len(content) > 600:
+            content = content[:600] + "…"
+        log_lines.append(f"{role}: {content}")
+    history = "\n".join(log_lines)
+
+    prompt = (
+        "You rewrite follow-up chat messages into standalone search queries.\n"
+        "Given the conversation and the user's latest message, output ONE "
+        "standalone question that captures what the user is asking, resolving "
+        "pronouns and implicit references using the prior turns.\n"
+        "Rules:\n"
+        "- Use the SAME language as the user's latest message.\n"
+        "- If the message is already fully standalone, return it verbatim.\n"
+        "- Output only the rewritten question. No quotes, prefix, or explanation.\n\n"
+        f"# CONVERSATION\n{history}\n\n"
+        f"# LATEST MESSAGE\n{question}\n\n"
+        "# STANDALONE QUESTION\n"
+    )
+
+    try:
+        model = await provision_langchain_model(
+            prompt, strategy_model_id, "tools", max_tokens=150
+        )
+        ai_message = await model.ainvoke(prompt)
+        rewritten = extract_text_content(ai_message.content)
+        rewritten = clean_thinking_content(rewritten).strip()
+        # Strip surrounding quotes if the model added them.
+        if len(rewritten) >= 2 and rewritten[0] in ('"', "'", "«") and rewritten[-1] in ('"', "'", "»"):
+            rewritten = rewritten[1:-1].strip()
+        return rewritten or question
+    except Exception as e:
+        logger.warning(f"Query condensation failed; using original question: {e}")
+        return question
 
 
 async def execute_multi_search(
@@ -285,10 +344,39 @@ async def stream_chat_rag_response(
         # Immediate first byte so the proxy sees the stream is alive.
         yield _sse({"type": "planning"})
 
+        # Load prior messages up front so we can condense follow-up questions
+        # before the planner sees them. Cheap op (local sqlite).
+        current_state = await asyncio.to_thread(
+            chat_graph.get_state,
+            config=RunnableConfig(configurable={"thread_id": full_session_id}),
+        )
+        prior_messages = (
+            list(current_state.values.get("messages", []))
+            if current_state and current_state.values
+            else []
+        )
+
+        # ---- Phase 0: query condensation (only if there's history) ----
+        # Rewrites "tell me more about that" into a standalone question using
+        # recent turns, so the planner + retrieval aren't flying blind.
+        search_question = message
+        if prior_messages:
+            t_condense = time.monotonic()
+            condense_task = asyncio.create_task(
+                condense_question(message, prior_messages, strategy_model_id)
+            )
+            async for keepalive in _drain_with_keepalive(
+                condense_task, {"type": "planning"}
+            ):
+                yield keepalive
+            search_question = await condense_task
+            trace["condensed_question"] = search_question
+            trace["condense_ms"] = int((time.monotonic() - t_condense) * 1000)
+
         # ---- Phase 1: planning agent (with keep-alive) ----
         t_phase = time.monotonic()
         planning_task = asyncio.create_task(
-            generate_search_strategy(message, strategy_model_id)
+            generate_search_strategy(search_question, strategy_model_id)
         )
         async for keepalive in _drain_with_keepalive(
             planning_task, {"type": "planning"}
@@ -318,16 +406,6 @@ async def stream_chat_rag_response(
 
         # ---- Phase 3: responding agent (token-streamed, bypasses chat_graph) ----
         t_phase = time.monotonic()
-        # Load prior conversation from the checkpointer.
-        current_state = await asyncio.to_thread(
-            chat_graph.get_state,
-            config=RunnableConfig(configurable={"thread_id": full_session_id}),
-        )
-        prior_messages = (
-            list(current_state.values.get("messages", []))
-            if current_state and current_state.values
-            else []
-        )
 
         # Render context as a clean per-source markdown block. Jinja was
         # previously handed a dict which stringified to Python repr — ugly for
