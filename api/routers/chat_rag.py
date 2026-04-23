@@ -141,6 +141,71 @@ async def condense_question(
         return question
 
 
+async def generate_followups(
+    question: str,
+    answer: str,
+    strategy_model_id: str,
+    n: int = 3,
+) -> List[str]:
+    """Generate short follow-up questions the user might want to ask next.
+
+    Fast: single small LLM call, ~300 tokens of output. Fails open — on any
+    parse/call error, returns [] and the stream continues normally.
+    """
+    if not answer.strip():
+        return []
+
+    # Trim the answer so we don't blow up the prompt on long responses.
+    answer_excerpt = answer[:2500] + ("…" if len(answer) > 2500 else "")
+
+    prompt = (
+        f"Generate {n} short follow-up questions the user might want to ask "
+        "next, based on the question and assistant answer below.\n"
+        "Rules:\n"
+        f"- Use the SAME language as the user's question.\n"
+        f"- Each question: 4-15 words, specific, answerable from the same document corpus.\n"
+        f"- Cover different angles (more detail, comparison, implication, edge case).\n"
+        f"- Do NOT repeat the original question.\n"
+        f"- Output ONLY a JSON array of {n} strings. No prose, no code fences, no keys.\n\n"
+        f"# QUESTION\n{question}\n\n"
+        f"# ANSWER\n{answer_excerpt}\n\n"
+        f"# {n} FOLLOW-UP QUESTIONS (JSON array)\n"
+    )
+
+    try:
+        model = await provision_langchain_model(
+            prompt,
+            strategy_model_id,
+            "tools",
+            max_tokens=300,
+            structured=dict(type="json"),
+        )
+        ai_message = await model.ainvoke(prompt)
+        raw = extract_text_content(ai_message.content)
+        cleaned = clean_thinking_content(raw).strip()
+        # Strip code fences if the model added them.
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").lstrip("json").strip()
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            # Some models wrap in {"questions": [...]} despite instructions.
+            for key in ("questions", "followups", "items"):
+                if key in parsed and isinstance(parsed[key], list):
+                    parsed = parsed[key]
+                    break
+        if not isinstance(parsed, list):
+            return []
+        out: List[str] = []
+        for item in parsed[:n]:
+            text = str(item).strip().strip('"').strip("'")
+            if text:
+                out.append(text)
+        return out
+    except Exception as e:
+        logger.warning(f"Follow-up generation failed: {e}")
+        return []
+
+
 async def execute_multi_search(
     strategy: Strategy,
     notebook_id: str | None = None,
@@ -477,8 +542,17 @@ async def stream_chat_rag_response(
         # Final consolidated answer event (keeps non-streaming path working).
         yield _sse({"type": "answer", "content": final_content})
 
-        # Persist both user + assistant messages to the checkpointer so future
-        # turns see conversation history. `add_messages` reducer handles append.
+        # Kick off follow-up generation and message persistence in parallel —
+        # neither blocks the other, so the user sees the `suggestions` event as
+        # soon as the small model is done instead of after the checkpointer
+        # write. Both use to_thread/LLM I/O; they're independent work.
+        t_followups = time.monotonic()
+        followups_task = asyncio.create_task(
+            generate_followups(
+                message, final_content, strategy_model_id
+            )
+        )
+
         ai_msg = AIMessage(content=final_content)
         await asyncio.to_thread(
             chat_graph.update_state,
@@ -497,6 +571,13 @@ async def stream_chat_rag_response(
         )
 
         await session.save()
+
+        # Wait for follow-ups (fail-open: empty list on error).
+        followups = await followups_task
+        trace["followups_ms"] = int((time.monotonic() - t_followups) * 1000)
+        if followups:
+            trace["followups"] = followups
+            yield _sse({"type": "suggestions", "items": followups})
 
         yield _sse({"type": "complete", "chunks_used": len(chunks)})
 
