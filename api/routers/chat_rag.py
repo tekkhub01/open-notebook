@@ -472,6 +472,64 @@ async def stream_chat_rag_response(
         # ---- Phase 3: responding agent (token-streamed, bypasses chat_graph) ----
         t_phase = time.monotonic()
 
+        user_message = HumanMessage(content=message)
+
+        # ---- No-context refusal path ----
+        # When retrieval returns zero chunks, answering from prior conversation
+        # or general knowledge cascades into fabricated citations and poisons
+        # the session history. Instead: call the LLM with a minimal strict
+        # prompt that forbids general-knowledge fallback, skip the suggestions
+        # + checkpointer write, and let the caller see a clean refusal.
+        if not chunks:
+            no_ctx_system = (
+                "You are a document-grounded assistant. A search against the "
+                "user's document corpus just returned ZERO relevant results "
+                "for their question.\n\n"
+                "STRICT RULES:\n"
+                "- DO NOT answer from your general knowledge.\n"
+                "- DO NOT invent source IDs, document names, or citations.\n"
+                "- Tell the user briefly (1-2 sentences) that you did not find "
+                "any relevant information in the available documents for their "
+                "specific question. You may invite them to rephrase or ask a "
+                "different question about the corpus.\n"
+                "- Reply in the SAME language as the user's question.\n"
+            )
+            no_ctx_payload = [
+                SystemMessage(content=no_ctx_system),
+                user_message,
+            ]
+            chat_model = await provision_langchain_model(
+                str(no_ctx_payload), final_model_override, "chat", max_tokens=200
+            )
+            raw_buffer = ""
+            emitted_len = 0
+            async for chunk in chat_model.astream(no_ctx_payload):
+                delta_raw = getattr(chunk, "content", None)
+                if delta_raw is None:
+                    continue
+                delta_text = extract_text_content(delta_raw)
+                if not delta_text:
+                    continue
+                raw_buffer += delta_text
+                cleaned = clean_thinking_content(raw_buffer)
+                if len(cleaned) > emitted_len:
+                    new_text = cleaned[emitted_len:]
+                    emitted_len = len(cleaned)
+                    yield _sse({"type": "answer_delta", "content": new_text})
+
+            final_content = clean_thinking_content(raw_buffer)
+            trace["answer_ms"] = int((time.monotonic() - t_phase) * 1000)
+            trace["no_context_refusal"] = True
+
+            yield _sse({"type": "answer", "content": final_content})
+            # Intentionally skip chat_graph.update_state and session.save:
+            # nothing from this turn should shape future retrieval or condensation.
+            # Intentionally skip follow-up suggestions: nothing meaningful to offer.
+            yield _sse(
+                {"type": "complete", "chunks_used": 0, "no_context": True}
+            )
+            return
+
         # Render context as a clean per-source markdown block. Jinja was
         # previously handed a dict which stringified to Python repr — ugly for
         # the LLM and the citation IDs embedded in the repr were fabricated.
@@ -509,7 +567,6 @@ async def stream_chat_rag_response(
             }
         )
 
-        user_message = HumanMessage(content=message)
         payload = (
             [SystemMessage(content=system_prompt)] + prior_messages + [user_message]
         )
