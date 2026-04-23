@@ -475,6 +475,8 @@ export const zhCN = {
     saveSuccess: "成功保存到笔记本",
     saveError: "保存到笔记本失败",
     selectNotebook: "选择笔记本",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "搜索与提问",
     searchResultsFor: "搜索 “{query}”",
     askAbout: "提问关于 “{query}”",

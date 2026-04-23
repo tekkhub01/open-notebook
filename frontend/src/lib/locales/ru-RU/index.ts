@@ -475,6 +475,8 @@ export const ruRU = {
     saveSuccess: "Успешно сохранено в блокнот",
     saveError: "Не удалось сохранить в блокнот",
     selectNotebook: "Выберите блокнот",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "Поиск и запрос",
     searchResultsFor: "Результаты поиска для «{query}»",
     askAbout: "Спросить о «{query}»",

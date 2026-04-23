@@ -32,6 +32,7 @@ async def search_knowledge_base(search_request: SearchRequest):
                 source=search_request.search_sources,
                 note=search_request.search_notes,
                 minimum_score=search_request.minimum_score,
+                notebook_id=search_request.notebook_id,
             )
         else:
             # Text search
@@ -40,6 +41,7 @@ async def search_knowledge_base(search_request: SearchRequest):
                 results=search_request.limit,
                 source=search_request.search_sources,
                 note=search_request.search_notes,
+                notebook_id=search_request.notebook_id,
             )
 
         return SearchResponse(
@@ -59,14 +61,18 @@ async def search_knowledge_base(search_request: SearchRequest):
 
 
 async def stream_ask_response(
-    question: str, strategy_model: Model, answer_model: Model, final_answer_model: Model
+    question: str,
+    strategy_model: Model,
+    answer_model: Model,
+    final_answer_model: Model,
+    notebook_id: str | None = None,
 ) -> AsyncGenerator[str, None]:
     """Stream the ask response as Server-Sent Events."""
     try:
         final_answer = None
 
         async for chunk in ask_graph.astream(
-            input=dict(question=question),  # type: ignore[arg-type]
+            input=dict(question=question, notebook_id=notebook_id),  # type: ignore[arg-type]
             config=dict(
                 configurable=dict(
                     strategy_model=strategy_model.id,
@@ -145,7 +151,11 @@ async def ask_knowledge_base(ask_request: AskRequest):
         # For streaming response
         return StreamingResponse(
             stream_ask_response(
-                ask_request.question, strategy_model, answer_model, final_answer_model
+                ask_request.question,
+                strategy_model,
+                answer_model,
+                final_answer_model,
+                notebook_id=ask_request.notebook_id,
             ),
             media_type="text/plain",
         )
@@ -192,7 +202,7 @@ async def ask_knowledge_base_simple(ask_request: AskRequest):
         # Run the ask graph and get final result
         final_answer = None
         async for chunk in ask_graph.astream(
-            input=dict(question=ask_request.question),  # type: ignore[arg-type]
+            input=dict(question=ask_request.question, notebook_id=ask_request.notebook_id),  # type: ignore[arg-type]
             config=dict(
                 configurable=dict(
                     strategy_model=strategy_model.id,

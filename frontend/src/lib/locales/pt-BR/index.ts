@@ -475,6 +475,8 @@ export const ptBR = {
     saveSuccess: "Salvo no caderno com sucesso",
     saveError: "Falha ao salvar no caderno",
     selectNotebook: "Selecionar Caderno",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "Buscar e Perguntar",
     searchResultsFor: "Resultados da busca para \"{query}\"",
     askAbout: "Perguntar sobre \"{query}\"",

@@ -475,6 +475,8 @@ export const itIT = {
     saveSuccess: "Salvato con successo nel quaderno",
     saveError: "Impossibile salvare nel quaderno",
     selectNotebook: "Seleziona quaderno",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "Cerca e chiedi",
     searchResultsFor: "Risultati di ricerca per \"{query}\"",
     askAbout: "Chiedi riguardo \"{query}\"",

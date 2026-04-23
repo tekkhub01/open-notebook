@@ -475,6 +475,8 @@ export const bnIN = {
     saveSuccess: "সফলভাবে নোটবুকে সংরক্ষণ করা হয়েছে",
     saveError: "নোটবুকে সংরক্ষণ করতে ব্যর্থ",
     selectNotebook: "নোটবুক নির্বাচন করুন",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "অনুসন্ধান ও জিজ্ঞাসা",
     searchResultsFor: "\"{query}\" এর জন্য অনুসন্ধান ফলাফল",
     askAbout: "\"{query}\" সম্পর্কে জিজ্ঞাসা করুন",

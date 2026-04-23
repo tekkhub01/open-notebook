@@ -475,6 +475,8 @@ export const jaJP = {
     saveSuccess: "ノートブックに保存しました",
     saveError: "ノートブックへの保存に失敗しました",
     selectNotebook: "ノートブックを選択",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "検索と質問",
     searchResultsFor: "「{query}」の検索結果",
     askAbout: "「{query}」について質問",

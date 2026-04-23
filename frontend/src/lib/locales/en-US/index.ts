@@ -475,6 +475,8 @@ export const enUS = {
     saveSuccess: "Successfully saved to notebook",
     saveError: "Failed to save to notebook",
     selectNotebook: "Select Notebook",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "Search & Ask",
     searchResultsFor: "Search results for “{query}”",
     askAbout: "Ask about “{query}”",

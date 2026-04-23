@@ -27,7 +27,7 @@ services:
       - SURREAL_PASSWORD=root
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
-      - OPENROUTER_API_KEY=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
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
     volumes:
       - ./notebook_data:/app/data
     depends_on:

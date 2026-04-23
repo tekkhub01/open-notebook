@@ -14,10 +14,12 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Search, ChevronDown, AlertCircle, Settings, Save, MessageCircleQuestion } from 'lucide-react'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Search, ChevronDown, AlertCircle, Settings, Save, MessageCircleQuestion, BookOpen } from 'lucide-react'
 import { useSearch } from '@/lib/hooks/use-search'
 import { useAsk } from '@/lib/hooks/use-ask'
 import { useModelDefaults, useModels } from '@/lib/hooks/use-models'
+import { useNotebooks } from '@/lib/hooks/use-notebooks'
 import { useModalManager } from '@/lib/hooks/use-modal-manager'
 import { LoadingSpinner } from '@/components/common/LoadingSpinner'
 import { StreamingResponse } from '@/components/search/StreamingResponse'
@@ -43,6 +45,9 @@ export default function SearchPage() {
   const [searchSources, setSearchSources] = useState(true)
   const [searchNotes, setSearchNotes] = useState(true)
 
+  // Notebook scope state
+  const [selectedNotebookId, setSelectedNotebookId] = useState<string | null>(null)
+
   // Ask state
   const [askQuestion, setAskQuestion] = useState(urlMode === 'ask' ? urlQuery : '')
 
@@ -62,6 +67,7 @@ export default function SearchPage() {
   const ask = useAsk()
   const { data: modelDefaults, isLoading: modelsLoading } = useModelDefaults()
   const { data: availableModels } = useModels()
+  const { data: notebooks } = useNotebooks(false)
   const { openModal } = useModalManager()
 
   const modelNameById = useMemo(() => {
@@ -91,9 +97,10 @@ export default function SearchPage() {
       limit: 100,
       search_sources: searchSources,
       search_notes: searchNotes,
-      minimum_score: 0.2
+      minimum_score: 0.2,
+      notebook_id: selectedNotebookId,
     })
-  }, [searchQuery, searchType, searchSources, searchNotes, searchMutation])
+  }, [searchQuery, searchType, searchSources, searchNotes, searchMutation, selectedNotebookId])
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -110,8 +117,8 @@ export default function SearchPage() {
       finalAnswer: modelDefaults.default_chat_model
     }
 
-    ask.sendAsk(askQuestion, models)
-  }, [askQuestion, modelDefaults, customModels, ask])
+    ask.sendAsk(askQuestion, models, selectedNotebookId)
+  }, [askQuestion, modelDefaults, customModels, ask, selectedNotebookId])
 
   // Auto-trigger search/ask when arriving with URL params
   useEffect(() => {
@@ -160,6 +167,28 @@ export default function SearchPage() {
     <AppShell>
       <div className="p-4 md:p-6">
         <h1 className="text-xl md:text-2xl font-bold mb-4 md:mb-6">{t('searchPage.askAndSearch')}</h1>
+
+        {/* Notebook Scope Selector */}
+        <div className="flex items-center gap-3 mb-4">
+          <BookOpen className="h-4 w-4 text-muted-foreground" />
+          <Label className="text-sm font-medium whitespace-nowrap">{t('searchPage.searchScope')}</Label>
+          <Select
+            value={selectedNotebookId ?? '__all__'}
+            onValueChange={(value) => setSelectedNotebookId(value === '__all__' ? null : value)}
+          >
+            <SelectTrigger className="w-full max-w-xs">
+              <SelectValue placeholder={t('searchPage.allNotebooks')} />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__all__">{t('searchPage.allNotebooks')}</SelectItem>
+              {notebooks?.map((nb) => (
+                <SelectItem key={nb.id} value={nb.id}>
+                  {nb.name}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
 
         <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as 'ask' | 'search')} className="w-full space-y-6">
           <div className="space-y-2">

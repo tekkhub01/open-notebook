@@ -475,6 +475,8 @@ export const zhTW = {
     saveSuccess: "成功儲存到筆記本",
     saveError: "儲存到筆記本失敗",
     selectNotebook: "選擇筆記本",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "搜尋與提問",
     searchResultsFor: "搜尋 “{query}”",
     askAbout: "提問關於 “{query}”",

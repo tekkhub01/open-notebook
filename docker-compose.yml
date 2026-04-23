@@ -14,11 +14,11 @@ services:
 
   open_notebook:
     image: lfnovo/open_notebook:v1-latest
-    # Ports exposed only internally - nginx handles external access
-    expose:
-      - "8502"  # Web UI
-      - "5055"  # REST API
+    ports:
+      - "8502:8502"  # Web UI
+      - "5056:5055"  # REST API direct (HTTP, for frontend access via Tailscale)
     environment:
+      - API_URL=http://brix-ia-linux.tail216abe.ts.net:5056
       - OPEN_NOTEBOOK_ENCRYPTION_KEY=6e94cd81786ef463356836b697faae972acefd916306ccdf5643cacd69fe0195
       - SURREAL_URL=ws://surrealdb:8000/rpc
       - SURREAL_USER=root
@@ -29,6 +29,16 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
     volumes:
       - ./notebook_data:/app/data
+      # Mount custom backend code over the image defaults
+      - ./open_notebook/database/migrations:/app/open_notebook/database/migrations:ro
+      - ./open_notebook/database/async_migrate.py:/app/open_notebook/database/async_migrate.py:ro
+      - ./open_notebook/domain/notebook.py:/app/open_notebook/domain/notebook.py:ro
+      - ./open_notebook/graphs/ask.py:/app/open_notebook/graphs/ask.py:ro
+      - ./api/models.py:/app/api/models.py:ro
+      - ./api/routers/search.py:/app/api/routers/search.py:ro
+      - ./api/routers/chat_rag.py:/app/api/routers/chat_rag.py:ro
+      - ./api/main.py:/app/api/main.py:ro
+      - ./prompts:/app/prompts:ro
     depends_on:
       - surrealdb
     restart: always

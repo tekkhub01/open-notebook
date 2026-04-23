@@ -475,6 +475,8 @@ export const frFR = {
     saveSuccess: "Enregistré avec succès dans le carnet",
     saveError: "Échec de l'enregistrement dans le carnet",
     selectNotebook: "Sélectionner un carnet",
+    searchScope: "Search scope",
+    allNotebooks: "All notebooks",
     searchAndAsk: "Rechercher & Demander",
     searchResultsFor: "Résultats de recherche pour “{query}”",
     askAbout: "Poser une question sur “{query}”",
