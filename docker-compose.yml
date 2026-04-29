@@ -44,13 +44,32 @@ services:
     restart: always
     pull_policy: always
 
+  ai_widget:
+    build:
+      context: ../ai-widget
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+      - OPEN_NOTEBOOK_ENDPOINT=http://open_notebook:5055
+      - OPEN_NOTEBOOK_NOTEBOOK_ID=notebook:wcey1gczvhr6vbdxyyn5
+      - OPEN_NOTEBOOK_STRATEGY_MODEL=model:8bk5wmrp1mksgceysphg
+      - OPEN_NOTEBOOK_CHAT_MODEL=model:8bk5wmrp1mksgceysphg
+    expose:
+      - "3000"
+    depends_on:
+      - open_notebook
+    restart: always
+
   nginx:
     image: nginx:alpine
     ports:
       - "5055:5055" # Open-Notebook API (HTTPS)
+      - "3000:3000" # AI Widget (HTTPS, LAN)
+      - "5555:5555" # AI Widget (HTTPS, public via router NAT)
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./ssl:/etc/nginx/ssl:ro
     depends_on:
       - open_notebook
+      - ai_widget
     restart: always
