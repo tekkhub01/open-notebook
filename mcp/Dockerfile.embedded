@@ -1,10 +1,19 @@
-# Extends the upstream open_notebook image to run the MCP server as a 4th
-# supervisord process inside the same container. Same lifecycle as the API.
-FROM lfnovo/open_notebook:v1-latest
+# Adds the MCP server as a 4th supervisord process. Same lifecycle as the API.
+#
+# The base is built from THIS repository (`make fork-image`), not pulled from
+# Docker Hub. Two reasons: the fork's backend AND frontend changes have to be
+# in the image (the old setup bind-mounted a few Python files over a published
+# image, so the frontend changes never shipped at all), and a floating
+# `v1-latest` tag drifts away from the source tree without warning.
+#
+# Two-step build on purpose: it leaves the upstream Dockerfile untouched, so
+# merges from upstream never conflict here.
+ARG BASE_IMAGE=open-notebook-fork:base
+FROM ${BASE_IMAGE}
 
 # Install MCP deps into the existing uv-managed venv at /app/.venv.
-# VIRTUAL_ENV is already set in the upstream image, so `uv pip install`
-# targets that venv. httpx may already be present transitively; that's fine.
+# VIRTUAL_ENV is already set in the base image, so `uv pip install` targets
+# that venv. httpx may already be present transitively; that's fine.
 RUN uv pip install --no-cache "mcp>=1.2.0" "httpx>=0.27.0"
 
 # Drop the MCP server alongside the rest of the app.

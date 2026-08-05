@@ -2,6 +2,7 @@
 .PHONY: docker-buildx-prepare docker-buildx-clean docker-buildx-reset
 .PHONY: docker-push docker-push-latest docker-release docker-build-local tag export-docs
 .PHONY: release-test release-stack release-stack-down
+.PHONY: fork-image
 
 # Get version from pyproject.toml
 VERSION := $(shell grep -m1 version pyproject.toml | cut -d'"' -f2)
@@ -62,6 +63,26 @@ release-stack:
 
 release-stack-down:
 	bash scripts/release-test/rc-stack.sh down "$(or $(TAG),unused)"
+
+# === Fork Image ===
+
+# Build this deployment's image from source, in two steps:
+#   1. open-notebook-fork:base — the upstream Dockerfile applied to THIS tree,
+#      so the fork's backend AND frontend changes are baked in.
+#   2. open-notebook-fork:mcp  — adds the MCP server as a 4th supervisord
+#      process (mcp/Dockerfile.embedded).
+#
+# Two steps rather than one extra stage in the upstream Dockerfile: that file
+# stays byte-identical to upstream, so future merges never conflict on it.
+# docker-compose.yml runs the :mcp image.
+fork-image:
+	@echo "🔨 [1/2] base image from source..."
+	docker build -t open-notebook-fork:base .
+	@echo "🔨 [2/2] MCP layer..."
+	docker build -t open-notebook-fork:mcp \
+		--build-arg BASE_IMAGE=open-notebook-fork:base \
+		-f mcp/Dockerfile.embedded mcp/
+	@echo "✅ open-notebook-fork:mcp pronta — deploy con: docker compose up -d"
 
 # === Docker Build Targets ===
 
