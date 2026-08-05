@@ -692,3 +692,44 @@ async def vector_search(
         logger.error(f"Error performing vector search: {str(e)}")
         logger.exception(e)
         raise DatabaseOperationError(e)
+
+
+async def vector_search_chunks(
+    keyword: str,
+    results: int,
+    source: bool = True,
+    note: bool = True,
+    minimum_score=0.2,
+    notebook_id: str | None = None,
+):
+    """Chunk-level variant of vector_search.
+
+    Returns rows {id, parent_id, title, content, order, similarity} where
+    `id` is the source_embedding (or source_insight / note) record id, not
+    the parent source. Used by the RAG pipeline to emit per-chunk citations.
+    """
+    if not keyword:
+        raise InvalidInputError("Search keyword cannot be empty")
+    try:
+        from open_notebook.utils.embedding import generate_embedding
+
+        embed = await generate_embedding(keyword)
+        nb_record_id = ensure_record_id(notebook_id) if notebook_id else None
+        search_results = await repo_query(
+            """
+            SELECT * FROM fn::vector_search_chunks($embed, $results, $source, $note, $minimum_score, $notebook_id);
+            """,
+            {
+                "embed": embed,
+                "results": results,
+                "source": source,
+                "note": note,
+                "minimum_score": minimum_score,
+                "notebook_id": nb_record_id,
+            },
+        )
+        return search_results
+    except Exception as e:
+        logger.error(f"Error performing chunk-level vector search: {str(e)}")
+        logger.exception(e)
+        raise DatabaseOperationError(e)

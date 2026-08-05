@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from ai_prompter import Prompter
 from open_notebook.ai.models import Model, model_manager
 from open_notebook.ai.provision import provision_langchain_model
-from open_notebook.domain.notebook import ChatSession, vector_search
+from open_notebook.domain.notebook import ChatSession, vector_search_chunks
 from open_notebook.exceptions import NotFoundError
 from open_notebook.graphs.chat import graph as chat_graph
 from open_notebook.utils import clean_thinking_content
@@ -214,13 +214,17 @@ async def execute_multi_search(
 ) -> List[Dict[str, Any]]:
     """Execute all searches from the strategy, normalize hits, and deduplicate.
 
-    vector_search returns rows of `{id, parent_id, title, similarity, matches}`
-    where `matches` is a flattened array of content strings for that record.
-    text_search returns `{id, parent_id, title, relevance}` with no content.
+    vector_search_chunks returns chunk-level rows of `{id, parent_id, title,
+    content, order, similarity}` where `id` is the source_embedding (or insight/
+    note) record id and `order` is the chunk sequence within the parent source.
+    text_search returns `{id, parent_id, title, relevance}` with no content and
+    collapsed at the source level.
 
-    Dedup key is `id` (not parent_id) so a source and its derived "Dense Summary"
-    insight — which share parent_id but have different ids — both stay in play.
-    Highest score wins on collision.
+    Each chunk is given a citation id:
+    - source_embedding chunks → `source:<parent>_chunk_<order>` (chunk-level)
+    - source_insight / note / text_search hits → unchanged record id
+
+    Dedup key is the citation id. Highest score wins on collision.
     """
     from open_notebook.domain.notebook import text_search
 
@@ -234,12 +238,12 @@ async def execute_multi_search(
     results_list: List[List[Dict[str, Any]]] = []
     if use_vector_search:
         logger.info(
-            f"Using vector search (min_similarity={min_similarity}, notebook={notebook_id})"
+            f"Using chunk-level vector search (min_similarity={min_similarity}, notebook={notebook_id})"
         )
         try:
             results_list = await asyncio.gather(
                 *[
-                    vector_search(
+                    vector_search_chunks(
                         s.term,
                         results=per_search_results,
                         source=True,
@@ -269,7 +273,10 @@ async def execute_multi_search(
             ]
         )
 
-    # Normalize + dedup on id (keep highest score).
+    # Normalize + dedup on citation id (keep highest score). The citation id is
+    # what the LLM will quote in its answer — for chunk-level vector hits it's
+    # synthesized as `source:<parent>_chunk_<order>`; for everything else it's
+    # the record id itself.
     best_by_id: Dict[str, Dict[str, Any]] = {}
     for results in results_list:
         if not results:
@@ -285,6 +292,9 @@ async def execute_multi_search(
             except (TypeError, ValueError):
                 score = 0.0
 
+            # vector_search_chunks already returns a single `content` string per
+            # row. The legacy `matches` array shape is preserved for any future
+            # caller that still emits it.
             raw_matches = hit.get("matches")
             if isinstance(raw_matches, list):
                 content = "\n\n".join(str(m) for m in raw_matches if m)
@@ -293,19 +303,33 @@ async def execute_multi_search(
             else:
                 content = hit.get("content") or ""
 
-            normalized = {
-                "id": hit_id,
-                "parent_id": str(hit.get("parent_id"))
+            parent_id = (
+                str(hit.get("parent_id"))
                 if hit.get("parent_id") is not None
-                else hit_id,
+                else hit_id
+            )
+            order = hit.get("order")
+
+            if hit_id.startswith("source_embedding:") and parent_id.startswith(
+                "source:"
+            ) and order is not None:
+                citation_id = f"{parent_id}_chunk_{order}"
+            else:
+                citation_id = hit_id
+
+            normalized = {
+                "id": citation_id,
+                "record_id": hit_id,
+                "parent_id": parent_id,
                 "title": hit.get("title", "") or "",
+                "order": order,
                 "score": score,
                 "content": content,
             }
 
-            existing = best_by_id.get(hit_id)
+            existing = best_by_id.get(citation_id)
             if existing is None or existing["score"] < normalized["score"]:
-                best_by_id[hit_id] = normalized
+                best_by_id[citation_id] = normalized
 
     # text_search hits have no content; fetch from the owning record so the LLM
     # has something substantive to work with.
