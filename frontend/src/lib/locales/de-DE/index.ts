@@ -503,6 +503,8 @@ export const deDE = {
     saveSuccess: "Erfolgreich im Notebook gespeichert",
     saveError: "Speichern im Notebook fehlgeschlagen",
     selectNotebook: "Notebook auswählen",
+    searchScope: "Suchbereich",
+    allNotebooks: "Alle Notebooks",
     searchAndAsk: "Suchen & Fragen",
     searchResultsFor: "Suchergebnisse für „{{query}}“",
     askAbout: "Fragen zu „{{query}}“",

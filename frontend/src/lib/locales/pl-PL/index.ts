@@ -500,6 +500,8 @@ export const plPL = {
     saveSuccess: "Pomyślnie zapisano do notatnika",
     saveError: "Nie udało się zapisać do notatnika",
     selectNotebook: "Wybierz notatnik",
+    searchScope: "Zakres wyszukiwania",
+    allNotebooks: "Wszystkie notatniki",
     searchAndAsk: "Szukaj i pytaj",
     searchResultsFor: "Wyniki wyszukiwania dla „{{query}}”",
     askAbout: "Zapytaj o „{{query}}”",

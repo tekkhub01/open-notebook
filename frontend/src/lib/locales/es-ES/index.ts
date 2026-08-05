@@ -500,6 +500,8 @@ export const esES = {
     saveSuccess: "Guardado exitosamente en el cuaderno",
     saveError: "Error al guardar en el cuaderno",
     selectNotebook: "Seleccionar cuaderno",
+    searchScope: "Ámbito de búsqueda",
+    allNotebooks: "Todos los cuadernos",
     searchAndAsk: "Buscar y preguntar",
     searchResultsFor: "Resultados de búsqueda para \"{{query}}\"",
     askAbout: "Preguntar sobre \"{{query}}\"",

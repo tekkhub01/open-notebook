@@ -500,6 +500,8 @@ export const trTR = {
     saveSuccess: "Deftere başarıyla kaydedildi",
     saveError: "Deftere kaydedilemedi",
     selectNotebook: "Defter Seçin",
+    searchScope: "Arama kapsamı",
+    allNotebooks: "Tüm defterler",
     searchAndAsk: "Ara ve Sor",
     searchResultsFor: "“{{query}}” için arama sonuçları",
     askAbout: "“{{query}}” hakkında sor",

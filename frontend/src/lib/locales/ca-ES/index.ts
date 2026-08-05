@@ -500,6 +500,8 @@ export const caES = {
     saveSuccess: "S'ha desat correctament al quadern",
     saveError: "Ha fallat el desament al quadern",
     selectNotebook: "Selecciona un quadern",
+    searchScope: "Àmbit de cerca",
+    allNotebooks: "Tots els quaderns",
     searchAndAsk: "Cerca i pregunta",
     searchResultsFor: "Resultats de cerca per a «{{query}}»",
     askAbout: "Pregunta sobre «{{query}}»",
