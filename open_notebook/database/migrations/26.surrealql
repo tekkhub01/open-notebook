@@ -1,4 +1,4 @@
--- Migration 17: chunk-level vector search
+-- Migration 26: chunk-level vector search
 -- Adds fn::vector_search_chunks that returns one row per source_embedding
 -- match (instead of collapsing all chunks of a source into one row like
 -- fn::vector_search does). Used by the RAG pipeline to emit chunk-level

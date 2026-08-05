@@ -1,4 +1,4 @@
--- Migration 15: Add notebook-scoped search functions
+-- Migration 24: Add notebook-scoped search functions
 -- Adds optional $notebook_id parameter to vector_search and text_search.
 -- When provided, results are filtered to sources/notes linked to that notebook.
 -- When NONE, behavior is unchanged (global search).

@@ -1,2 +1,2 @@
--- Rollback migration 17
+-- Rollback migration 26
 REMOVE FUNCTION IF EXISTS fn::vector_search_chunks;
