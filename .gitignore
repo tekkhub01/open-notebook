@@ -142,3 +142,10 @@ specs/
 .harness/
 
 .mcp.json
+
+# RAG debug corpora: large third-party documents used as test fixtures.
+# Only the audit write-ups are tracked.
+docs/RAG-DEBUG/*
+!docs/RAG-DEBUG/RAG-AUDIT.md
+docs/REG-DEBUG2/*
+!docs/REG-DEBUG2/RAG-AUDIT.md
