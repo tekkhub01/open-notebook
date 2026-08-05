@@ -4,7 +4,7 @@ services:
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
     user: root
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # DB raw — solo loopback, esposto via TS serve :8001
     volumes:
       - ./surreal_data:/mydata
     environment:
@@ -21,7 +21,7 @@ services:
       - "8502"  # Web UI
       - "5055"  # REST API
     environment:
-      - OPEN_NOTEBOOK_ENCRYPTION_KEY=6e94cd81786ef463356836b697faae972acefd916306ccdf5643cacd69fe0195
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY:?set it in .env}
       - SURREAL_URL=ws://surrealdb:8000/rpc
       - SURREAL_USER=root
       - SURREAL_PASSWORD=root
@@ -48,7 +48,7 @@ services:
   surrealist:
     image: surrealdb/surrealist:latest
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"  # UI — solo loopback, esposto via TS serve :8444 tailnet-only
     depends_on:
       - surrealdb
     restart: always

@@ -4,7 +4,7 @@ services:
     command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
     user: root  # Required for bind mounts on Linux
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"  # DB raw — solo loopback, esposto via TS serve :8001
     volumes:
       - ./surreal_data:/mydata
     environment:
@@ -13,13 +13,16 @@ services:
     pull_policy: always
 
   open_notebook:
-    image: lfnovo/open_notebook:v1-latest
+    build:
+      context: ./mcp
+      dockerfile: Dockerfile.embedded
     ports:
-      - "8502:8502"  # Web UI
-      - "5056:5055"  # REST API direct (HTTP, for frontend access via Tailscale)
+      - "127.0.0.1:8502:8502"  # Web UI (tailscale-only via TS serve :8502)
+      - "127.0.0.1:5056:5055"  # REST API direct (tailscale-only via TS serve :5056)
+      - "5057:8080"  # MCP server (Streamable HTTP, for lobe-chat — pubblico)
     environment:
       - API_URL=http://brix-ia-linux.tail216abe.ts.net:5056
-      - OPEN_NOTEBOOK_ENCRYPTION_KEY=6e94cd81786ef463356836b697faae972acefd916306ccdf5643cacd69fe0195
+      - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY:?set it in .env}
       - SURREAL_URL=ws://surrealdb:8000/rpc
       - SURREAL_USER=root
       - SURREAL_PASSWORD=root
@@ -27,6 +30,11 @@ services:
       - SURREAL_DATABASE=open_notebook
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # MCP server config (used by the embedded mcp_server process)
+      - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD:-}
+      - OPEN_NOTEBOOK_NOTEBOOK_ID=${MCP_DEFAULT_NOTEBOOK_ID:-}
+      - OPEN_NOTEBOOK_STRATEGY_MODEL=${MCP_DEFAULT_STRATEGY_MODEL:-model:8bk5wmrp1mksgceysphg}
+      - OPEN_NOTEBOOK_CHAT_MODEL=${MCP_DEFAULT_CHAT_MODEL:-model:8bk5wmrp1mksgceysphg}
     volumes:
       - ./notebook_data:/app/data
       # Mount custom backend code over the image defaults
@@ -37,6 +45,7 @@ services:
       - ./api/models.py:/app/api/models.py:ro
       - ./api/routers/search.py:/app/api/routers/search.py:ro
       - ./api/routers/chat_rag.py:/app/api/routers/chat_rag.py:ro
+      - ./api/routers/chunks.py:/app/api/routers/chunks.py:ro
       - ./api/main.py:/app/api/main.py:ro
       - ./prompts:/app/prompts:ro
     depends_on:
@@ -60,16 +69,34 @@ services:
       - open_notebook
     restart: always
 
+  macchine_widget:
+    build:
+      context: ../macchine-widget
+      dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+      - OPEN_NOTEBOOK_ENDPOINT=http://open_notebook:5055
+      - OPEN_NOTEBOOK_NOTEBOOK_ID=notebook:ui3cujj5t2ti6ykjdn1d
+      - OPEN_NOTEBOOK_STRATEGY_MODEL=model:8bk5wmrp1mksgceysphg
+      - OPEN_NOTEBOOK_CHAT_MODEL=model:8bk5wmrp1mksgceysphg
+    expose:
+      - "3000"
+    depends_on:
+      - open_notebook
+    restart: always
+
   nginx:
     image: nginx:alpine
     ports:
       - "5055:5055" # Open-Notebook API (HTTPS)
       - "3000:3000" # AI Widget (HTTPS, LAN)
       - "5555:5555" # AI Widget (HTTPS, public via router NAT)
+      - "5556:5556" # Macchine Widget (HTTPS, public via router NAT)
     volumes:
       - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
       - ./ssl:/etc/nginx/ssl:ro
     depends_on:
       - open_notebook
       - ai_widget
+      - macchine_widget
     restart: always
