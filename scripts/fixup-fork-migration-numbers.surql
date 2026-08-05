@@ -27,17 +27,20 @@
 -- DATA conversions (speaker_config name -> record link, absolute -> relative
 -- audio paths, legacy podcast provider/model fields dropped).
 --
--- Usage (adjust host/credentials):
---   docker compose exec -T surrealdb /surreal sql \
---     --conn ws://localhost:8000 --user root --pass root \
---     --ns open_notebook --db open_notebook --pretty \
---     < scripts/fixup-fork-migration-numbers.surql
+-- Usage (adjust host/credentials). Send it to the HTTP /sql endpoint:
+--   curl -s -X POST http://127.0.0.1:8000/sql -u root:root \
+--     -H "surreal-ns: open_notebook" -H "surreal-db: open_notebook" \
+--     -H "Accept: application/json" \
+--     --data-binary @scripts/fixup-fork-migration-numbers.surql
+--
+-- Do NOT pipe this file into `surreal sql`. That CLI splits input per line and
+-- mangles multi-line statements: during testing it silently deleted EVERY
+-- _sbl_migrations row instead of only those above 14. The HTTP endpoint parses
+-- the file as one script and was verified to leave versions 1-14 intact.
 
 -- Guard: only rewind a database that is exactly at the fork's version 17.
 -- On any other version this deletes nothing, so an accidental second run on an
 -- already-migrated database (version 26) is a no-op.
-DELETE _sbl_migrations
-WHERE version > 14
-  AND (SELECT VALUE math::max(version) FROM ONLY _sbl_migrations GROUP ALL) = 17;
+DELETE _sbl_migrations WHERE version > 14 AND math::max((SELECT VALUE version FROM _sbl_migrations)) = 17;
 
 SELECT version, applied_at FROM _sbl_migrations ORDER BY version;
