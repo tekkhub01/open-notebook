@@ -1,0 +1,17 @@
+# Extends the upstream open_notebook image to run the MCP server as a 4th
+# supervisord process inside the same container. Same lifecycle as the API.
+FROM lfnovo/open_notebook:v1-latest
+
+# Install MCP deps into the existing uv-managed venv at /app/.venv.
+# VIRTUAL_ENV is already set in the upstream image, so `uv pip install`
+# targets that venv. httpx may already be present transitively; that's fine.
+RUN uv pip install --no-cache "mcp>=1.2.0" "httpx>=0.27.0"
+
+# Drop the MCP server alongside the rest of the app.
+RUN mkdir -p /app/mcp_server
+COPY server.py /app/mcp_server/server.py
+
+# Replace supervisord conf with one that runs api+worker+frontend+mcp.
+COPY supervisord.with-mcp.conf /etc/supervisor/conf.d/supervisord.conf
+
+EXPOSE 5055 8502 8080
