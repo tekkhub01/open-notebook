@@ -149,3 +149,12 @@ docs/RAG-DEBUG/*
 !docs/RAG-DEBUG/RAG-AUDIT.md
 docs/REG-DEBUG2/*
 !docs/REG-DEBUG2/RAG-AUDIT.md
+
+# Local Docker Compose override (auto-merged by `docker compose up`).
+# Use it for host-specific tweaks like re-exposing the SurrealDB port;
+# see docker-compose.override.yml.example.
+docker-compose.override.yml
+
+# Local QA/debug artifacts
+screenshot-*.png
+history.txt

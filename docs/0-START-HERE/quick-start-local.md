@@ -2,6 +2,8 @@
 
 Get Open Notebook running with **100% local AI** using Ollama. No cloud API keys needed, completely private.
 
+**Already have Ollama installed?** See [External Ollama Guide](quick-start-external-ollama.md) instead.
+
 ## Prerequisites
 
 1. **Docker Desktop** installed
@@ -31,9 +33,12 @@ Create a new folder `open-notebook-local` and add this file:
 services:
   surrealdb:
     image: surrealdb/surrealdb:v2
-    command: start --user root --pass password --bind 0.0.0.0:8000 rocksdb:/mydata/mydatabase.db
+    command: start --user root --pass password rocksdb:/mydata/mydatabase.db
+    user: root
     ports:
-      - "8000:8000"
+      # Localhost only — the database uses default credentials, so never
+      # publish this port on 0.0.0.0
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./surreal_data:/mydata
 
@@ -53,6 +58,9 @@ services:
       - SURREAL_PASSWORD=password
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
+
+      # Ollama (required when running Ollama via Docker, as in this compose file)
+      - OLLAMA_API_BASE=http://ollama:11434
     volumes:
       - ./notebook_data:/app/data
     depends_on:
@@ -65,10 +73,15 @@ services:
       - "11434:11434"
     volumes:
       - ./ollama_models:/root/.ollama
-    environment:
-      # Optional: set GPU support if available
-      - OLLAMA_NUM_GPU=0
     restart: always
+    # Optional: set GPU support if available
+    #deploy:
+    #  resources:
+    #    reservations:
+    #      devices:
+    #        - driver: nvidia
+    #          count: 1
+    #          capabilities: [gpu]
 
 ```
 
@@ -121,7 +134,7 @@ You should see the Open Notebook interface.
 
 ## Step 6: Configure Ollama Provider (1 min)
 
-1. Go to **Settings** → **API Keys**
+1. Go to **Manage** → **Models**
 2. Click **Add Credential**
 3. Select provider: **Ollama**
 4. Give it a name (e.g., "Local Ollama")
@@ -134,7 +147,7 @@ You should see the Open Notebook interface.
 
 ## Step 7: Configure Local Model (1 min)
 
-1. Go to **Settings** → **Models**
+1. Go to **Manage** → **Models**
 2. Set:
    - **Language Model**: `ollama/mistral` (or whichever model you downloaded)
    - **Embedding Model**: `ollama/nomic-embed-text` (auto-downloads if missing)
@@ -225,8 +238,7 @@ Check if GPU is available:
 # Show available GPUs
 docker exec open-notebook-local-ollama-1 ollama ps
 
-# Enable GPU in docker-compose.yml:
-# - OLLAMA_NUM_GPU=1
+# Enable GPU in docker-compose.yml
 ```
 
 Then restart: `docker compose restart ollama`
@@ -252,8 +264,6 @@ docker exec open-notebook-local-ollama-1 ollama pull neural-chat
 3. **Full Documentation**: [See all features](../3-USER-GUIDE/index.md)
 4. **Scale Up**: Deploy to a server with better hardware for faster responses
 5. **Benchmark Models**: Try different models to find the speed/quality tradeoff you prefer
-
----
 
 ## Alternative: Using LM Studio Instead of Ollama
 

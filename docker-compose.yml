@@ -1,10 +1,21 @@
 services:
   surrealdb:
     image: surrealdb/surrealdb:v2
-    command: start --log info --user root --pass root rocksdb:/mydata/mydatabase.db
+    # Credentials default to root:root for a zero-config local setup. Before
+    # exposing this instance to a network, set SURREAL_USER / SURREAL_PASSWORD
+    # in a .env file (see .env.example) — they are applied here and to the
+    # open_notebook service below, so the two always stay in sync.
+    # List (exec) form so each interpolated value stays a single argument —
+    # a password containing spaces would otherwise be split into several.
+    command: ["start", "--log", "info", "--user", "${SURREAL_USER:-root}", "--pass", "${SURREAL_PASSWORD:-root}", "rocksdb:/mydata/mydatabase.db"]
     user: root  # Required for bind mounts on Linux
     ports:
-      - "127.0.0.1:8000:8000"  # DB raw — solo loopback, esposto via TS serve :8001
+      # Bound to localhost only: the open_notebook service reaches this over
+      # the internal compose network regardless, so the host port is purely
+      # for local debugging (e.g. Surrealist, `surreal sql`). Exposing this
+      # on 0.0.0.0 would let anyone who can reach the host connect with the
+      # default root:root credentials. Reached remotely via Tailscale serve :8001.
+      - "127.0.0.1:8000:8000"
     volumes:
       - ./surreal_data:/mydata
     environment:
@@ -22,19 +33,38 @@ services:
       - "5057:8080"  # MCP server (Streamable HTTP, for lobe-chat — pubblico)
     environment:
       - API_URL=http://brix-ia-linux.tail216abe.ts.net:5056
+      # Encrypts the API keys stored in the database. Kept in .env (gitignored)
+      # because this repo is public.
       - OPEN_NOTEBOOK_ENCRYPTION_KEY=${OPEN_NOTEBOOK_ENCRYPTION_KEY:?set it in .env}
+
+      # Database connection. SURREAL_USER / SURREAL_PASSWORD default to root:root
+      # for local use; override them in a .env file before exposing the instance
+      # (the same values configure the surrealdb service above).
       - SURREAL_URL=ws://surrealdb:8000/rpc
-      - SURREAL_USER=root
-      - SURREAL_PASSWORD=root
+      - SURREAL_USER=${SURREAL_USER:-root}
+      - SURREAL_PASSWORD=${SURREAL_PASSWORD:-root}
       - SURREAL_NAMESPACE=open_notebook
       - SURREAL_DATABASE=open_notebook
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+
       # MCP server config (used by the embedded mcp_server process)
       - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD:-}
       - OPEN_NOTEBOOK_NOTEBOOK_ID=${MCP_DEFAULT_NOTEBOOK_ID:-}
       - OPEN_NOTEBOOK_STRATEGY_MODEL=${MCP_DEFAULT_STRATEGY_MODEL:-model:8bk5wmrp1mksgceysphg}
       - OPEN_NOTEBOOK_CHAT_MODEL=${MCP_DEFAULT_CHAT_MODEL:-model:8bk5wmrp1mksgceysphg}
+
+      # OPTIONAL: heavy extraction runtimes, installed on first startup when
+      # enabled (downloads are cached on the ./notebook_data volume, so only the
+      # first boot is slow). See docs/5-CONFIGURATION/environment-reference.md.
+      # - OPEN_NOTEBOOK_ENABLE_DOCLING=true    # Docling engine + OCR + image sources (large ML stack)
+      # - OPEN_NOTEBOOK_ENABLE_CRAWL4AI=true   # local Crawl4AI (bundles a Chromium browser)
+      # - CRAWL4AI_API_URL=http://crawl4ai:11235  # use a remote Crawl4AI server instead (no local install)
+
+      # OPTIONAL: max concurrent background tasks the worker processes at once
+      # (default 5). Set to 1 for sequential processing on single-GPU / local
+      # LLM setups to avoid overloading the model with parallel requests.
+      # - OPEN_NOTEBOOK_WORKER_MAX_TASKS=1
     volumes:
       - ./notebook_data:/app/data
       # Mount custom backend code over the image defaults

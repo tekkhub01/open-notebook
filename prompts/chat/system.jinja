@@ -11,7 +11,8 @@ Whenever a user asks you a question, you need to identify the query context and 
 {% if notebook %}
 # PROJECT INFORMATION
 
-{{notebook}}
+**Name:** {{notebook.name}}
+**Description:** {{notebook.description}}
 {% endif %}
 
 {% if context %}
@@ -21,6 +22,10 @@ The user has selected this context to help you with your response:
 
 {{context}}
 {% endif %}
+
+# MATH FORMATTING
+
+When showing math, write display math as $$...$$ and inline math as $...$ so formulas render properly. Only use fenced ```latex code blocks when the user explicitly asks for the LaTeX source itself.
 
 # CITING INSTRUCTIONS
 
