@@ -8,6 +8,7 @@ import json
 import time
 from typing import Any, AsyncGenerator, Dict, List, Optional
 
+from ai_prompter import Prompter
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -16,17 +17,15 @@ from langchain_core.runnables import RunnableConfig
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from ai_prompter import Prompter
 from open_notebook.ai.models import Model, model_manager
 from open_notebook.ai.provision import provision_langchain_model
 from open_notebook.domain.notebook import ChatSession, vector_search_chunks
-from open_notebook.exceptions import NotFoundError
-from open_notebook.graphs.chat import graph as chat_graph
-from open_notebook.utils import clean_thinking_content
-from open_notebook.utils.text_utils import extract_text_content
 
 # Reuse Strategy model from ask.py
 from open_notebook.graphs.ask import Strategy
+from open_notebook.graphs.chat import graph as chat_graph
+from open_notebook.utils import clean_thinking_content
+from open_notebook.utils.text_utils import extract_text_content
 
 router = APIRouter()
 
