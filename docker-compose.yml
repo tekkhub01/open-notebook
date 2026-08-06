@@ -52,6 +52,13 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
 
+      # Chunking. There is no env_file here, so .env only feeds the ${...}
+      # substitution below — these two lines are what actually puts the values
+      # inside the container, for both the API and the worker (same container,
+      # under supervisord). Rationale and sizing live in .env next to the values.
+      - OPEN_NOTEBOOK_CHUNK_SIZE=${OPEN_NOTEBOOK_CHUNK_SIZE:-2600}
+      - OPEN_NOTEBOOK_CHUNK_OVERLAP=${OPEN_NOTEBOOK_CHUNK_OVERLAP:-0}
+
       # MCP server config (used by the embedded mcp_server process)
       - OPEN_NOTEBOOK_PASSWORD=${OPEN_NOTEBOOK_PASSWORD:-}
       - OPEN_NOTEBOOK_NOTEBOOK_ID=${MCP_DEFAULT_NOTEBOOK_ID:-}
@@ -103,8 +110,15 @@ services:
       - NODE_ENV=production
       - OPEN_NOTEBOOK_ENDPOINT=http://open_notebook:5055
       - OPEN_NOTEBOOK_NOTEBOOK_ID=notebook:ui3cujj5t2ti6ykjdn1d
-      - OPEN_NOTEBOOK_STRATEGY_MODEL=model:8bk5wmrp1mksgceysphg
-      - OPEN_NOTEBOOK_CHAT_MODEL=model:8bk5wmrp1mksgceysphg
+      # google/gemini-3.5-flash-lite. Sostituisce gemini-3-flash-preview il
+      # 2026-08-06: a parità di corpus è ~3x più rapido (9s contro 28s di
+      # mediana su quattro domande reali), costa meno, e non è uno slug
+      # "preview" che Google può ritirare senza preavviso. Sulle prove fatte
+      # copriva meglio il merito — cita meno passaggi ma centra la domanda.
+      # Il vecchio record resta in DB: per tornare indietro basta rimettere
+      # model:8bk5wmrp1mksgceysphg qui e ricostruire il widget.
+      - OPEN_NOTEBOOK_STRATEGY_MODEL=model:qbbyj40dun21dw9oso8h
+      - OPEN_NOTEBOOK_CHAT_MODEL=model:qbbyj40dun21dw9oso8h
     expose:
       - "3000"
     depends_on:
