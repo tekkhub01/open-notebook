@@ -19,6 +19,7 @@ from open_notebook.domain.notebook import Note, Source, SourceInsight
 from open_notebook.exceptions import ConfigurationError
 from open_notebook.utils.chunking import ContentType, chunk_text, detect_content_type
 from open_notebook.utils.embedding import generate_embedding, generate_embeddings
+from open_notebook.utils.frontmatter import extract_frontmatter
 
 # NOTE: `stop_on` below can never trigger in practice — each command catches
 # ValueError internally and returns success=False instead of raising, so the
@@ -338,12 +339,34 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
             {"source_id": ensure_record_id(input_data.source_id)},
         )
 
-        # 3. Detect content type from file path if available
+        # 3. Persist the document's YAML frontmatter on the source, if it has one.
+        #
+        # It is written here rather than at source creation because this is the
+        # one place that always sees the final full_text, and because it must be
+        # refreshed when a source is re-embedded after its content changed. The
+        # field is set with a targeted UPDATE instead of source.save() so that a
+        # concurrent edit to the source cannot be clobbered by a stale full_text
+        # held in this command's copy.
+        frontmatter = extract_frontmatter(source.full_text)
+        if frontmatter is not None:
+            await repo_query(
+                "UPDATE $source_id SET metadata = $metadata;",
+                {
+                    "source_id": ensure_record_id(input_data.source_id),
+                    "metadata": frontmatter,
+                },
+            )
+            logger.info(
+                f"Stored {len(frontmatter)} frontmatter field(s) on source "
+                f"{input_data.source_id}: {sorted(frontmatter)[:8]}"
+            )
+
+        # 4. Detect content type from file path if available
         file_path = source.asset.file_path if source.asset else None
         content_type = detect_content_type(source.full_text, file_path)
         logger.debug(f"Detected content type: {content_type.value}")
 
-        # 4. Chunk text using appropriate splitter
+        # 5. Chunk text using appropriate splitter
         chunks = chunk_text(source.full_text, content_type=content_type)
         total_chunks = len(chunks)
 
@@ -359,7 +382,7 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
         if total_chunks == 0:
             raise ValueError("No chunks created after splitting text")
 
-        # 5. Generate embeddings for all chunks in batches
+        # 6. Generate embeddings for all chunks in batches
         cmd_id = get_command_id(input_data)
         logger.debug(f"Generating embeddings for {total_chunks} chunks")
         embeddings = await generate_embeddings(chunks, command_id=cmd_id)
@@ -371,7 +394,7 @@ async def embed_source_command(input_data: EmbedSourceInput) -> EmbedSourceOutpu
                 f"for {len(chunks)} chunks"
             )
 
-        # 6. Bulk INSERT source_embedding records
+        # 7. Bulk INSERT source_embedding records
         records = [
             {
                 "source": ensure_record_id(input_data.source_id),

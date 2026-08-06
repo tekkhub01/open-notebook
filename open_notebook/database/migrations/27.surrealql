@@ -1,0 +1,103 @@
+-- Migration 27: source frontmatter metadata, surfaced on chunk search results
+--
+-- Corpora prepared for retrieval carry a YAML frontmatter block identifying the
+-- act and its place in the corpus (celex, regulation_number, priorita_fonte,
+-- testo_aggiornato, natura, ...). Those values are constant for the whole
+-- document, so they live on `source` and are read back through the existing
+-- source_embedding -> source join rather than being copied onto every chunk.
+--
+-- FLEXIBLE because the frontmatter schema belongs to the corpus generator, not
+-- to this application: adding a field upstream must not require a migration.
+
+DEFINE FIELD IF NOT EXISTS metadata ON TABLE source FLEXIBLE TYPE option<object>;
+
+-- Redefined (not just extended) to add `metadata` to the projection: SurrealDB
+-- has no ALTER FUNCTION. Body is otherwise identical to migration 26.
+REMOVE FUNCTION IF EXISTS fn::vector_search_chunks;
+
+DEFINE FUNCTION IF NOT EXISTS fn::vector_search_chunks(
+    $query: array<float>,
+    $match_count: int,
+    $sources: bool,
+    $show_notes: bool,
+    $min_similarity: float,
+    $notebook_id: option<record<notebook>>
+) {
+    let $notebook_source_ids = IF $notebook_id != NONE {
+        (SELECT VALUE in FROM reference WHERE out = $notebook_id)
+    } ELSE { NONE };
+
+    let $notebook_note_ids = IF $notebook_id != NONE {
+        (SELECT VALUE in FROM artifact WHERE out = $notebook_id)
+    } ELSE { NONE };
+
+    let $source_embedding_search =
+        IF $sources {(
+            SELECT
+                id,
+                source.id as parent_id,
+                source.title as title,
+                source.metadata as metadata,
+                content,
+                order,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM source_embedding
+            WHERE embedding != none AND array::len(embedding) = array::len($query) AND
+                 vector::similarity::cosine(embedding, $query) >= $min_similarity AND
+                 ($notebook_source_ids IS NONE OR source IN $notebook_source_ids)
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $source_insight_search =
+        IF $sources {(
+            SELECT
+                id,
+                source.id as parent_id,
+                insight_type + ' - ' + (source.title OR '') as title,
+                source.metadata as metadata,
+                content,
+                NONE as order,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM source_insight
+            WHERE embedding != none AND array::len(embedding) = array::len($query) AND
+                vector::similarity::cosine(embedding, $query) >= $min_similarity AND
+                ($notebook_source_ids IS NONE OR source IN $notebook_source_ids)
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    -- Notes have no frontmatter; NONE keeps the row shape uniform so callers can
+    -- read `metadata` without branching on the row's origin.
+    let $note_content_search =
+        IF $show_notes {(
+            SELECT
+                id,
+                id as parent_id,
+                title,
+                NONE as metadata,
+                content,
+                NONE as order,
+                vector::similarity::cosine(embedding, $query) as similarity
+            FROM note
+            WHERE embedding != none AND array::len(embedding) = array::len($query) AND
+                vector::similarity::cosine(embedding, $query) >= $min_similarity AND
+                ($notebook_note_ids IS NONE OR id IN $notebook_note_ids)
+            ORDER BY similarity DESC
+            LIMIT $match_count
+        )}
+        ELSE { [] };
+
+    let $all_results = array::union(
+        array::union($source_embedding_search, $source_insight_search),
+        $note_content_search
+    );
+
+    RETURN (SELECT id, parent_id, title, metadata, content, order, similarity
+            FROM $all_results
+            WHERE id IS NOT None
+            ORDER BY similarity DESC
+            LIMIT $match_count);
+};

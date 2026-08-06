@@ -29,9 +29,19 @@ def _build_text_with_max_tokens(fragment: str, max_tokens: int) -> str:
 
 
 def _build_text_exceeding_tokens(fragment: str, threshold_tokens: int) -> str:
-    """Build text that exceeds a token threshold."""
+    """Build text comfortably past a token threshold.
+
+    Stopping at threshold+1 made these tests depend on the ambient chunking
+    config: tokens are not additive across a split boundary, so the splitter's
+    greedy merge can measure the reassembled text at threshold+1 and emit a
+    single chunk. Whether it does depends on CHUNK_SIZE and CHUNK_OVERLAP, which
+    are configurable per deployment — so the suite would pass on the defaults and
+    fail on a valid custom setting. Overshooting keeps the intent ("text longer
+    than one chunk gets split") independent of how the window is configured.
+    """
+    target = int(threshold_tokens * 1.5)
     text = fragment
-    while token_count(text) <= threshold_tokens:
+    while token_count(text) <= target:
         text += fragment
     return text
 

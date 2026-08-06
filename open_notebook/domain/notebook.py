@@ -408,6 +408,14 @@ class Source(ObjectModel):
     topics: Optional[List[str]] = Field(default_factory=list)
     full_text: Optional[str] = None
     last_viewed_at: Optional[datetime] = None
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "YAML frontmatter of the ingested document, when it has one. Constant "
+            "for the whole source, so chunk search reads it through its join "
+            "instead of duplicating it per chunk. Populated by embed_source."
+        ),
+    )
     command: Optional[Union[str, RecordID]] = Field(
         default=None, description="Link to surreal-commands processing job"
     )
