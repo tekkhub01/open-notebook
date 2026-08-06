@@ -55,13 +55,42 @@ POST /api/chat/rag/execute
 
 ### Response (Streaming SSE)
 
-```
-data: {"type":"strategy","chunks_retrieved":15}
+Events arrive in pipeline order. A client may ignore any event it does not
+know; the only ones it must handle are `answer_delta`, `error` and `complete`.
 
-data: {"type":"answer","content":"Based on the research..."}
+| event | payload | meaning |
+|---|---|---|
+| `planning` | — | keep-alive while condensing / planning (~every 3s) |
+| `plan` | `reasoning` | the planner's rationale, truncated to 180 chars |
+| `searching` | — | keep-alive while the searches run |
+| `strategy` | `chunks_retrieved` | search finished, before the context budget |
+| `sources` | `items`, `retrieved`, `best_score`, `weak` | the passages the answer is built on |
+| `answer_delta` | `content` | answer token(s); append |
+| `answer` | `content` | the whole answer again, once (keeps the non-streaming path working) |
+| `suggestions` | `items` | follow-up questions, or reformulations after a refusal |
+| `complete` | `chunks_used`, `no_context?` | end of stream |
+| `error` | `message` | fatal for this turn |
 
-data: {"type":"complete","chunks_used":15}
 ```
+data: {"type":"planning"}
+
+data: {"type":"plan","reasoning":"The user is asking about manufacturer duties…"}
+
+data: {"type":"strategy","chunks_retrieved":49}
+
+data: {"type":"sources","items":[{"id":"source:abc_chunk_12","parent_id":"source:abc","title":"Regolamento (UE) 2023/1230 — Regolamento macchine","order":12,"score":0.735,"metadata":{"celex":"32023R1230","eli":"http://data.europa.eu/eli/reg/2023/1230/oj","testo_aggiornato":true}}],"retrieved":49,"best_score":0.735,"weak":false}
+
+data: {"type":"answer_delta","content":"In base al "}
+
+data: {"type":"complete","chunks_used":18}
+```
+
+`sources` is emitted **before the first `answer_delta`**, so a client can
+resolve the `[source:<id>_chunk_<n>]` citations in the answer text as they
+stream. `items` carries no chunk text — fetch a passage on demand from
+`/api/chunks/{id}`. `metadata` is the whitelisted subset of the owning
+document's frontmatter (`CLIENT_METADATA_FIELDS`, see ADR-008); it is `{}` for
+notes and for documents ingested without one.
 
 ### Response (Non-streaming)
 
@@ -196,18 +225,50 @@ export async function POST(req: Request) {
 ```
 User Question
     ↓
+[Condense against history]        only when the session has prior turns
+    ↓
 [Generate Strategy]
     ↓
-Query 1    Query 2    Query 3
+Query 1    Query 2    Query 3     up to five
     ↓         ↓          ↓
-[Vector Search (parallel)]
+[Vector Search (parallel)]        chunk-level, min_similarity 0.5
     ↓
-[Deduplicate Chunks]
+[Deduplicate + rank]              relevance band, then source precedence
     ↓
-[Chat Graph with Context]
+[Context budget]                  head of the ranked list that fits
     ↓
-Response (with memory)
+[Answer, streamed]                + weak-retrieval guardrail if thin
+    ↓
+[Persist state] ‖ [Follow-ups]    in parallel
 ```
+
+### Ranking and context selection
+
+Chunks are ordered by similarity **band** first and only then by the source's
+`priorita_fonte`, so curated precedence breaks ties the retriever could not
+separate without ever overriding a clearly better match (`SIMILARITY_BAND`).
+Content with no declared precedence sorts after ranked sources inside the same
+band.
+
+The ranked list is then cut to what fits `MAX_CONTEXT_CHUNKS` /
+`MAX_CONTEXT_CHARS`. Truncation always removes the tail, so the answer cites
+the same passages it would have cited from the full list. `strategy` reports
+what was retrieved, `complete` what was actually used; the gap between them is
+how much the budget is cutting.
+
+### When retrieval is thin or empty
+
+- **Nothing retrieved** → the model is given a strict refusal prompt (no
+  general-knowledge fallback, no invented citations), the turn is *not* written
+  to the session history, and `suggestions` carries questions the corpus can
+  actually answer, derived from the notebook's document list.
+- **Best match below `WEAK_RETRIEVAL_SCORE`** → the answer is still produced,
+  but an extra system message tells the model to say the coverage is marginal
+  and to propose a better-scoped question. `sources.weak` reports it so a
+  client can show the caveat independently of the model complying.
+
+The threshold is calibrated against observed `rag_trace` history rather than
+guessed — see the comment on the constant before changing it.
 
 ## Configuration
 
@@ -227,8 +288,17 @@ No new variables required. Uses existing Open-Notebook configuration.
 
 - Requires embedding model configured
 - Session management required (cookie/localStorage in widget)
-- Strategy generation adds ~1-2s latency per request
-- Maximum 50 chunks retrieved (configurable in code)
+- Three sequential model calls run before the first answer token (condense,
+  plan, then the answer itself). On `rag_trace` history that is a median ~7s to
+  first token without conversation history, ~9s with it.
+- Up to 50 chunks retrieved (5 searches × 10), of which `MAX_CONTEXT_CHUNKS`
+  reach the prompt
+- Similarity tracks how *specific* the question is nearly as much as how well
+  the corpus covers it: short or generic questions score lower and can fall
+  below `min_similarity` entirely, taking the no-context path even when the
+  corpus does hold the answer
+- A planner failure ends the turn — unlike condensation, follow-ups and
+  reformulations, `generate_search_strategy` has no fail-open fallback
 
 ## Testing
 

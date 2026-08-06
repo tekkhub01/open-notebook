@@ -6,7 +6,7 @@ Hybrid Chat + RAG endpoint combining:
 import asyncio
 import json
 import time
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Dict, Iterable, List, Optional
 
 from ai_prompter import Prompter
 from fastapi import APIRouter, HTTPException
@@ -205,6 +205,379 @@ async def generate_followups(
         return []
 
 
+async def corpus_titles(notebook_id: Optional[str], limit: int = 40) -> List[str]:
+    """Names of the documents in the notebook, as a user would recognise them.
+
+    Only used on the paths where retrieval came back empty or thin, so the cost
+    of listing the notebook is paid on the turns that have nothing better to do
+    with the time. Fails open: an empty list just means the reformulation
+    prompt has to work from the question alone.
+    """
+    if not notebook_id:
+        return []
+    try:
+        from open_notebook.domain.notebook import Notebook
+
+        notebook = await Notebook.get(notebook_id)
+        if not notebook:
+            return []
+        sources = await notebook.get_sources()
+    except Exception as e:
+        logger.warning(f"Could not list corpus sources: {e}")
+        return []
+
+    titles: List[str] = []
+    for source in sources[:limit]:
+        title = _display_title(
+            {
+                "metadata": getattr(source, "metadata", None),
+                "title": getattr(source, "title", None),
+            }
+        )
+        if title:
+            titles.append(title)
+    return titles
+
+
+async def suggest_reformulations(
+    question: str,
+    titles: List[str],
+    strategy_model_id: str,
+    n: int = 3,
+) -> List[str]:
+    """Questions the corpus *can* answer, offered when the user's one missed.
+
+    A refusal that ends there puts the burden of guessing the corpus's shape on
+    the user, who cannot see it. Listing the documents lets the model propose
+    questions that are adjacent to the intent and actually answerable, which is
+    the difference between a dead end and a redirect.
+
+    Fails open like the follow-up generator: no suggestions is a worse UI, not
+    a broken one.
+    """
+    if not titles:
+        return []
+
+    catalogue = "\n".join(f"- {t}" for t in titles)
+    prompt = (
+        f"A user asked a question against a document corpus and the search "
+        f"returned NOTHING relevant. Propose {n} different questions that this "
+        f"corpus can actually answer and that stay as close as possible to what "
+        f"the user seems to be after.\n"
+        "Rules:\n"
+        "- Use the SAME language as the user's question.\n"
+        "- Each question: 5-16 words, concrete, answerable from the documents listed.\n"
+        "- Do NOT restate the user's question.\n"
+        "- Do NOT invent documents or topics that are not in the list.\n"
+        f"- Output ONLY a JSON array of {n} strings. No prose, no code fences.\n\n"
+        f"# USER QUESTION\n{question}\n\n"
+        f"# DOCUMENTS IN THE CORPUS\n{catalogue}\n\n"
+        f"# {n} ANSWERABLE QUESTIONS (JSON array)\n"
+    )
+
+    try:
+        model = await provision_langchain_model(
+            prompt,
+            strategy_model_id,
+            "tools",
+            max_tokens=300,
+            structured=dict(type="json"),
+        )
+        ai_message = await model.ainvoke(prompt)
+        cleaned = clean_thinking_content(
+            extract_text_content(ai_message.content)
+        ).strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").lstrip("json").strip()
+        parsed = json.loads(cleaned)
+        if isinstance(parsed, dict):
+            for key in ("questions", "items", "suggestions"):
+                if isinstance(parsed.get(key), list):
+                    parsed = parsed[key]
+                    break
+        if not isinstance(parsed, list):
+            return []
+        return [str(item).strip().strip('"').strip("'") for item in parsed[:n] if str(item).strip()]
+    except Exception as e:
+        logger.warning(f"Reformulation generation failed: {e}")
+        return []
+
+
+# Chunks whose similarity differs by less than this are treated as equally
+# relevant, and `priorita_fonte` decides which comes first. Retrieval scores are
+# not precise enough to distinguish 0.71 from 0.73, but the corpus's own source
+# hierarchy is exact — so within the noise the curated order wins. Widening this
+# lets precedence override genuine relevance differences; keep it small.
+SIMILARITY_BAND = 0.05
+
+# Content with no `priorita_fonte` (notes, insights, documents ingested without
+# frontmatter) sorts after explicitly ranked sources inside the same band: a
+# declared rank is a deliberate curation signal, its absence is not a claim to
+# precedence. Across bands nothing moves, so a clearly more relevant unranked
+# chunk still outranks a marginal one.
+UNRANKED_PRIORITY = 99
+
+# The provenance line is repeated in front of every retrieved chunk, so a source
+# with a long list of pending amendments would otherwise spend a large slice of
+# the context window restating it. Enough to name the amendments, not to quote
+# their titles in full.
+MAX_PROVENANCE_DETAIL_CHARS = 240
+
+# Five planned searches returning ten hits each can survive dedup as ~50 chunks.
+# At the corpus's 2600-character chunk size that is 130k characters of context,
+# and everything past the first handful of bands is material the retriever
+# already judged worse — it dilutes the answer and is paid for on every turn.
+# Both caps apply; whichever binds first wins. Chunks are dropped from the tail
+# of the ranked list, so precedence and relevance decide what survives.
+MAX_CONTEXT_CHUNKS = 18
+MAX_CONTEXT_CHARS = 60000
+
+# Below this similarity the corpus does not really cover the question. We still
+# answer — a marginal passage is often the right one — but the model is told to
+# say so and to propose a better-scoped question instead of dressing thin
+# material up as an answer.
+#
+# Calibrated against the `rag_trace` history rather than guessed: across 25
+# answerable questions on the machinery corpus the best chunk scored 0.604 to
+# 0.795, the low end being a short question ("da quando partirà il
+# regolamento?") that the corpus answers exactly. Similarity here tracks how
+# specific the *query* is nearly as much as how well the corpus covers it, so a
+# threshold anywhere near that 0.604 floor labels good answers as thin. Sitting
+# just above the retriever's own `min_similarity=0.5` makes this a rare safety
+# net, which is the intent: a false "the corpus barely covers this" costs the
+# reader more than a missing one.
+WEAK_RETRIEVAL_SCORE = 0.55
+
+# Frontmatter keys the client is allowed to see. Deliberately a whitelist and
+# not the whole block: the answer UI needs to name the act, link it, and warn
+# about standing, while ingestion bookkeeping (`pipeline`, `generato`,
+# `fonte_pdf`, `unita_recuperabili`) is noise on the wire and in the DOM.
+CLIENT_METADATA_FIELDS = (
+    "title",
+    "titolo_breve",
+    "official_title",
+    "celex",
+    "regulation_number",
+    "type",
+    "tipo_documento",
+    "natura",
+    "vincolante",
+    "testo_aggiornato",
+    "priorita_fonte",
+    "avvertenza",
+    "eli",
+    "modifiche_da_integrare",
+)
+
+
+def _as_text(value: Any) -> str:
+    """Flatten a frontmatter value into one readable phrase.
+
+    Fields carrying amendment history (`modifiche_da_integrare`,
+    `modifiche_integrate`) are a plain string in some documents and a list of
+    strings in others — the corpus generator uses whichever fits the act, so
+    both have to render. Anything else stringifies; the point is to say
+    *something* useful rather than to silently drop the value.
+    """
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        value = [f"{k}: {v}" for k, v in value.items()]
+    if isinstance(value, (list, tuple)):
+        return "; ".join(part for part in (_as_text(v) for v in value) if part)
+    if value is None or isinstance(value, bool):
+        return ""
+    return str(value).strip()
+
+
+def _provenance_detail(value: Any) -> str:
+    """`_as_text`, trimmed to what belongs in a per-chunk header."""
+    text = _as_text(value)
+    if len(text) > MAX_PROVENANCE_DETAIL_CHARS:
+        text = text[: MAX_PROVENANCE_DETAIL_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _provenance_line(metadata: Optional[Dict[str, Any]]) -> str:
+    """One line of source provenance to sit under a context block's header.
+
+    Carries what the answer has to be able to say about the passage it is
+    quoting: which act it comes from, whether that act binds, and whether its
+    text is current. Doctrinal commentary is not withheld from retrieval — it is
+    labelled, so the model can use it for practice and criticism without
+    presenting it as the applicable provision.
+    """
+    if not metadata:
+        return ""
+
+    parts: List[str] = []
+    celex = metadata.get("celex")
+    if celex:
+        parts.append(f"CELEX {celex}")
+    regulation_number = metadata.get("regulation_number")
+    if regulation_number:
+        parts.append(str(regulation_number))
+
+    priority = metadata.get("priorita_fonte")
+    if isinstance(priority, int) and not isinstance(priority, bool):
+        parts.append(f"source precedence {priority} (lower wins)")
+
+    natura = metadata.get("natura")
+    if isinstance(natura, str) and natura == "dottrina":
+        parts.append(
+            "DOCTRINE, NOT BINDING — do not cite as the applicable provision; "
+            "use for practice and open issues only"
+        )
+    elif metadata.get("vincolante") is False:
+        parts.append("NOT BINDING")
+
+    if metadata.get("testo_aggiornato") is False:
+        pending = _provenance_detail(metadata.get("modifiche_da_integrare"))
+        detail = f" ({pending})" if pending else ""
+        parts.append(
+            f"TEXT NOT CURRENT on some points{detail} — say so when answering on them"
+        )
+
+    return f"*{' · '.join(parts)}*" if parts else ""
+
+
+def _source_priority(chunk: Dict[str, Any]) -> int:
+    metadata = chunk.get("metadata") or {}
+    priority = metadata.get("priorita_fonte")
+    if isinstance(priority, bool) or not isinstance(priority, int):
+        return UNRANKED_PRIORITY
+    return priority
+
+
+def _similarity_band(score: float) -> int:
+    """Quantise a similarity score into a band index.
+
+    Rounded, not truncated: in binary floating point 0.70 / 0.05 is
+    13.999999999999998, so truncation would drop 0.70 and 0.72 into different
+    bands and defeat the tie-break they are supposed to share.
+    """
+    return round(score / SIMILARITY_BAND)
+
+
+def _rank_chunks(chunks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Order retrieved chunks by relevance, with source precedence as tie-break.
+
+    Sorting is by similarity band first, so precedence only reshuffles chunks
+    the retriever could not meaningfully separate.
+    """
+
+    def key(chunk: Dict[str, Any]) -> tuple:
+        try:
+            score = float(chunk.get("score", 0.0))
+        except (TypeError, ValueError):
+            score = 0.0
+        return (-_similarity_band(score), _source_priority(chunk), -score)
+
+    return sorted(chunks, key=key)
+
+
+def _select_context_chunks(chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Take the head of the ranked list that fits the context budget.
+
+    Truncation only ever removes the worst-ranked material, so an answer built
+    on the selection cites the same passages it would have cited from the full
+    list. A chunk that overruns the character budget stops the selection rather
+    than being skipped over: past that point everything is lower-ranked anyway,
+    and letting a short tail chunk jump a long one would reorder citations for
+    no gain.
+    """
+    selected: List[Dict[str, Any]] = []
+    used = 0
+    for chunk in chunks[:MAX_CONTEXT_CHUNKS]:
+        length = len(chunk.get("content") or "")
+        if selected and used + length > MAX_CONTEXT_CHARS:
+            break
+        selected.append(chunk)
+        used += length
+    return selected
+
+
+def _best_score(chunks: Iterable[Dict[str, Any]]) -> float:
+    """Highest similarity in the retrieved set.
+
+    Taken across the whole set rather than off the first element: ranking sorts
+    by band and then by precedence, so the top row is the most *authoritative*
+    chunk of the best band, not necessarily the closest match.
+    """
+    best = 0.0
+    for chunk in chunks:
+        try:
+            score = float(chunk.get("score", 0.0))
+        except (TypeError, ValueError):
+            continue
+        best = max(best, score)
+    return best
+
+
+def _client_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The subset of a source's frontmatter that the answer UI can render."""
+    if not isinstance(metadata, dict):
+        return {}
+
+    out: Dict[str, Any] = {}
+    for key in CLIENT_METADATA_FIELDS:
+        value = metadata.get(key)
+        if value is None or value == "" or value == [] or value == {}:
+            continue
+        # The amendment list is the one field that arrives as prose in some
+        # documents and as a list in others; the client wants one line either way.
+        out[key] = _provenance_detail(value) if key == "modifiche_da_integrare" else value
+    return out
+
+
+def _display_title(chunk: Dict[str, Any]) -> str:
+    """Human name for a retrieved chunk's document.
+
+    Falls back through the frontmatter's own titles before the source record's
+    title, which for an ingested file is the filename — `titolo_breve` first
+    because it is written to fit a label, where `title` is the full official
+    name of the act.
+    """
+    metadata = chunk.get("metadata") or {}
+    for key in ("titolo_breve", "title"):
+        value = metadata.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+
+    raw = (chunk.get("title") or "").strip()
+    if raw.endswith(".md"):
+        raw = raw[:-3]
+    return raw or str(chunk.get("id") or "")
+
+
+def _client_sources(chunks: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Citation descriptors for the chunks that went into the context.
+
+    Keyed by the same citation id the model is told to quote, so the client can
+    resolve `[source:xyz_chunk_4]` in the answer to a named, badged, linkable
+    document. Content is deliberately left out — the widget already fetches a
+    passage on demand through /api/chunks/{id}, and shipping it twice would
+    double the payload of every turn.
+    """
+    items: List[Dict[str, Any]] = []
+    for chunk in chunks:
+        try:
+            score = round(float(chunk.get("score", 0.0)), 3)
+        except (TypeError, ValueError):
+            score = 0.0
+        items.append(
+            {
+                "id": chunk.get("id"),
+                "parent_id": chunk.get("parent_id"),
+                "title": _display_title(chunk),
+                "order": chunk.get("order"),
+                "score": score,
+                "metadata": _client_metadata(chunk.get("metadata")),
+            }
+        )
+    return items
+
+
 async def execute_multi_search(
     strategy: Strategy,
     notebook_id: str | None = None,
@@ -214,8 +587,10 @@ async def execute_multi_search(
     """Execute all searches from the strategy, normalize hits, and deduplicate.
 
     vector_search_chunks returns chunk-level rows of `{id, parent_id, title,
-    content, order, similarity}` where `id` is the source_embedding (or insight/
-    note) record id and `order` is the chunk sequence within the parent source.
+    metadata, content, order, similarity}` where `id` is the source_embedding (or
+    insight/note) record id and `order` is the chunk sequence within the parent
+    source. `metadata` is the owning document's YAML frontmatter, joined in by
+    the search function; it is NONE for notes and for documents without one.
     text_search returns `{id, parent_id, title, relevance}` with no content and
     collapsed at the source level.
 
@@ -316,6 +691,10 @@ async def execute_multi_search(
             else:
                 citation_id = hit_id
 
+            metadata = hit.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+
             normalized = {
                 "id": citation_id,
                 "record_id": hit_id,
@@ -324,6 +703,9 @@ async def execute_multi_search(
                 "order": order,
                 "score": score,
                 "content": content,
+                # Frontmatter of the owning document, joined in by
+                # fn::vector_search_chunks. Empty for anything without one.
+                "metadata": metadata,
             }
 
             existing = best_by_id.get(citation_id)
@@ -354,9 +736,7 @@ async def execute_multi_search(
             except Exception as e:
                 logger.warning(f"Could not enrich {chunk['id']}: {e}")
 
-    all_chunks = sorted(
-        best_by_id.values(), key=lambda c: c.get("score", 0.0), reverse=True
-    )
+    all_chunks = _rank_chunks(best_by_id.values())
     logger.info(
         f"Retrieved {len(all_chunks)} unique chunks (from "
         f"{sum(len(r or []) for r in results_list)} raw hits)"
@@ -545,14 +925,61 @@ async def stream_chat_rag_response(
             trace["no_context_refusal"] = True
 
             yield _sse({"type": "answer", "content": final_content})
+
+            # A refusal on its own leaves the user guessing what the corpus
+            # holds. Follow-ups derived from the answer would be meaningless
+            # here — there is no answer to follow up on — so these come from the
+            # document catalogue instead, and are the one useful thing this turn
+            # can still produce.
+            reformulations = await suggest_reformulations(
+                message,
+                await corpus_titles(notebook_id),
+                strategy_model_id,
+            )
+            if reformulations:
+                yield _sse({"type": "suggestions", "items": reformulations})
+
             # Intentionally skip chat_graph.update_state and session.save:
             # nothing from this turn should shape future retrieval or condensation.
-            # Intentionally skip follow-up suggestions: nothing meaningful to offer.
             yield _sse(
                 {"type": "complete", "chunks_used": 0, "no_context": True}
             )
             return
 
+        # How well the corpus actually covers the question, measured before the
+        # context budget trims anything — the cut only ever removes weaker
+        # material, so it cannot change the best score, but reading it off the
+        # full set keeps the two decisions independent.
+        best_score = _best_score(chunks)
+        weak_retrieval = best_score < WEAK_RETRIEVAL_SCORE
+        trace["best_score"] = round(best_score, 3)
+        trace["weak_retrieval"] = weak_retrieval
+
+        retrieved_count = len(chunks)
+        chunks = _select_context_chunks(chunks)
+        # Not `chunks_retrieved`: the trace block in `finally` writes the chunk
+        # snapshots under that key, and would silently overwrite a count put
+        # there. Both numbers are worth having — the gap between them is how
+        # much the context budget is cutting.
+        trace["retrieved_total"] = retrieved_count
+        trace["chunks_in_context"] = len(chunks)
+        if len(chunks) < retrieved_count:
+            logger.info(
+                f"Context budget: {len(chunks)}/{retrieved_count} chunks kept"
+            )
+
+        # Announce the passages the answer is being built from, before the first
+        # token arrives. The client resolves the citation ids in the answer text
+        # against this list, so it has to be on the wire first.
+        yield _sse(
+            {
+                "type": "sources",
+                "items": _client_sources(chunks),
+                "retrieved": retrieved_count,
+                "best_score": round(best_score, 3),
+                "weak": weak_retrieval,
+            }
+        )
         # Render context as a clean per-source markdown block. Jinja was
         # previously handed a dict which stringified to Python repr — ugly for
         # the LLM and the citation IDs embedded in the repr were fabricated.
@@ -563,7 +990,13 @@ async def stream_chat_rag_response(
             content = (c.get("content") or "").strip()
             if not content:
                 continue
-            header = f"### [{c['id']}] {c.get('title') or c['id']}"
+            # The document's own title, not the ingested filename: an answer
+            # that has to name its source should say "Regolamento (UE)
+            # 2023/1230", not "reg-2023-1230-macchine.md".
+            header = f"### [{c['id']}] {_display_title(c)}"
+            provenance = _provenance_line(c.get("metadata"))
+            if provenance:
+                header = f"{header}\n{provenance}"
             context_blocks.append(f"{header}\n{content}")
         context_text = "\n\n".join(context_blocks) if context_blocks else ""
 
@@ -575,6 +1008,7 @@ async def stream_chat_rag_response(
                     "content": c.get("content", ""),
                     "title": c.get("title", ""),
                     "score": c.get("score", 0),
+                    "metadata": c.get("metadata") or {},
                 }
                 for c in chunks
             ]
@@ -590,9 +1024,32 @@ async def stream_chat_rag_response(
             }
         )
 
-        payload = (
-            [SystemMessage(content=system_prompt)] + prior_messages + [user_message]
-        )
+        system_messages = [SystemMessage(content=system_prompt)]
+        if weak_retrieval:
+            # Appended rather than folded into the template: the condition is a
+            # property of this turn's retrieval, and chat/system is shared with
+            # every other caller of the chat graph.
+            system_messages.append(
+                SystemMessage(
+                    content=(
+                        "RETRIEVAL QUALITY WARNING. The closest passage in the "
+                        "corpus matched this question only weakly, so the "
+                        "context below may be tangential to what was asked.\n"
+                        "- Open with one short sentence saying the documents "
+                        "cover this question only marginally.\n"
+                        "- Answer strictly from the passages provided; do not "
+                        "fill the gaps from general knowledge, and do not "
+                        "present a tangential passage as if it were on point.\n"
+                        "- If the passages genuinely do not answer the "
+                        "question, say so plainly instead of writing around it.\n"
+                        "- Close by proposing one more precise question the "
+                        "corpus can answer.\n"
+                        "- Reply in the SAME language as the user's question.\n"
+                    )
+                )
+            )
+
+        payload = system_messages + prior_messages + [user_message]
 
         chat_model = await provision_langchain_model(
             str(payload), final_model_override, "chat", max_tokens=8192
